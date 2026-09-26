@@ -1,4 +1,4 @@
-﻿"""eOCR simulator - plays the eOCR partner system against the ACE integration service.
+"""eOCR simulator - plays the eOCR partner system against the ACE integration service.
 
 It follows the ACE to eOCR Integration Specification v1.1 exactly and is a TEST HARNESS, not product.
 
@@ -17,7 +17,9 @@ import io
 import json
 import os
 import re
+import random
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -271,6 +273,17 @@ def testdata(name):
     return _cache[name]
 
 
+def page_slice(data, first, count):
+    """Pages first..first+count-1 (1-based) of a PDF, as new PDF bytes."""
+    reader = PdfReader(io.BytesIO(data))
+    w = PdfWriter()
+    for p in range(first - 1, first - 1 + count):
+        w.add_page(reader.pages[p])
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
 def split_pdf(data, parts):
     reader = PdfReader(io.BytesIO(data))
     n = len(reader.pages)
@@ -327,15 +340,24 @@ class Scenario:
         self.flaky = kw.get("flaky", 0)
         self.hitl_reject = kw.get("hitl_reject", [])       # fields the HITL reviewer marks as mismatched
         self.control_override = kw.get("control_override")
-        self.result = {"scenario": name, "loanId": loan_id, "correlationId": self.correlation_id, "checks": [], "errors": [], "stages": []}
+        self.folder_batch_path = kw.get("folder_batch_path", False)  # send the folder, not the file (spec 4.1 wording)
+        self.after = kw.get("after")               # another scenario that must finish first
+        self.expect_description = kw.get("expect_description")
+        self.done = threading.Event()
+        self.result = {"scenario": name, "loanId": loan_id, "correlationId": self.correlation_id, "checks": [], "errors": [], "stages": [],
+                       "documents": [{"fileName": n, "bytes": len(d)} for n, _, d in docs]}
 
     @property
     def folder(self):
         return f"loanId={self.loan_id}/correlationId={self.correlation_id}/"
 
     @property
-    def batch_path(self):
+    def control_key(self):
         return self.folder + "controlfile.json"
+
+    @property
+    def batch_path(self):
+        return self.folder if self.folder_batch_path else self.control_key
 
     def ok(self, what):
         self.result["checks"].append(what)
@@ -353,8 +375,9 @@ class Scenario:
             self.control_override(control)
         for name, ct, data in self.docs:
             s3.put_object(Bucket=INTAKE_BUCKET, Key=self.folder + name, Body=data, ContentType=ct)
-        s3.put_object(Bucket=INTAKE_BUCKET, Key=self.batch_path, Body=json.dumps(control, indent=2).encode(), ContentType="application/json")
-        self.ok(f"staged s3://{INTAKE_BUCKET}/{self.folder} ({len(self.docs)} documents + controlfile.json)")
+        s3.put_object(Bucket=INTAKE_BUCKET, Key=self.control_key, Body=json.dumps(control, indent=2).encode(), ContentType="application/json")
+        self.result["controlFile"] = control
+        self.ok(f"staged s3://{INTAKE_BUCKET}/{self.folder} ({len(self.docs)} documents + controlfile.json); batchPath sent: {self.batch_path}")
 
     def onboard(self):
         body = {"loanId": self.loan_id, "correlationId": self.correlation_id, "batchPath": self.batch_path}
@@ -424,6 +447,8 @@ class Scenario:
             self.err(f"terminal status {code} {final['status']['value']} ('{final['status']['description']}') != expected {self.expect_code} {STATUS[self.expect_code]}")
         else:
             self.ok(f"Status API terminal: {code} {final['status']['value']} - {final['status']['description']}")
+        if self.expect_description and self.expect_description.lower() not in final["status"]["description"].lower():
+            self.err(f"status.description '{final['status']['description']}' does not mention '{self.expect_description}'")
         records = self.callbacks()
         delivered = [r for r in records if r["answeredWith"] == 200]
         self.result["callbackAttempts"] = [{"attempt": r["attempt"], "at": r["receivedAt"], "answered": r["answeredWith"], "caller": r["callerPrincipal"]} for r in records]
@@ -479,6 +504,9 @@ class Scenario:
                         f"{summary['documentTypes']} document types, {summary['documents']} documents, {summary['extractedFields']} extracted fields, validationStatus={doc['validationStatus']}")
 
     def run(self, timeout_s):
+        if self.after is not None:
+            self.after.done.wait(timeout_s)
+            self.result["startedAfter"] = self.after.name
         started = time.time()
         try:
             self.stage()
@@ -490,6 +518,7 @@ class Scenario:
             log("scenario error", scenario=self.name, trace=traceback.format_exc()[-1500:])
         self.result["minutes"] = round((time.time() - started) / 60, 1)
         self.result["passed"] = not self.result["errors"]
+        self.done.set()
         return self.result
 
 
@@ -516,30 +545,49 @@ def contract_checks():
 
 
 def build_scenarios(loan, only):
+    """Packages are page slices of the test loan that always contain its NOTE. Slice sizes are random
+    per run and never equal across scenarios, because ACE marks a package with the same page count and
+    OCR text as an earlier one as a DUPLICATE (tested on purpose by duplicate-resubmission)."""
     pkg = testdata(loan["file"])
-    parts = split_pdf(pkg, 3)
-    three = [(f"{loan['loanId']}_part{i + 1}.pdf", "application/pdf", data) for i, (data, _) in enumerate(parts)]
-    one = [(f"{loan['loanId']}_package.pdf", "application/pdf", pkg)]
-    small = small_text_pdf(pkg)
+    note_first, note_last = loan["notePages"]
+    rnd = random.Random()
+
+    def around_note(min_pages, max_pages):
+        count = rnd.randint(min_pages, max_pages)
+        first = rnd.randint(max(1, note_last - count + 1), note_first)
+        return first, count
+
+    lid = loan["loanId"]
+    h_first, h_count = around_note(120, 159)
+    happy_parts = [(f"{lid}_part{i + 1}.pdf", "application/pdf", data) for i, (data, _) in enumerate(split_pdf(page_slice(pkg, h_first, h_count), 3))]
+    n_first, n_count = around_note(40, 69)
+    no_extraction_doc = [(f"{lid}_package.pdf", "application/pdf", page_slice(pkg, n_first, n_count))]
+    v_first, v_count = around_note(80, 109)
+    validation_doc = [(f"{lid}_package.pdf", "application/pdf", page_slice(pkg, v_first, v_count))]
+    cover = page_slice(pkg, 1, 2)
     wrong = {"loanAmount": "1.00", "sellerLoanNumber": "0000000000"}
 
     def mismatch_ids(control):
         control["loanInfo"]["loanId"] = "SOMEONE-ELSE"
 
-    scenarios = {
-        "happy-path": Scenario("happy-path", loan["loanId"], three, True, loan_info(loan), 0, expect_validation="PASSED", flaky=2),
-        "no-extraction": Scenario("no-extraction", loan["loanId"], one, False, loan_info(loan), 0, expect_validation="PASSED"),
-        "validation-failed": Scenario("validation-failed", loan["loanId"], one, True, loan_info(loan, wrong), 2000,
-                                      expect_validation="FAILED", hitl_reject=["sellerLoanNumber", "loanAmount"]),
-        "precheck-failed": Scenario("precheck-failed", loan["loanId"],
-                                    [("cover.pdf", "application/pdf", small), ("locked.pdf", "application/pdf", password_protected_pdf()),
-                                     ("broken.pdf", "application/pdf", b"%PDF-1.4\n1 0 obj garbage\n")], True, loan_info(loan), 1000,
-                                    expect_failed={"locked.pdf": "Password Protected", "broken.pdf": "Corrupted"}),
-        "control-file-mismatch": Scenario("control-file-mismatch", loan["loanId"], [("cover.pdf", "application/pdf", small)], False,
-                                          loan_info(loan), 1000, expect_failed={"controlfile.json": "Loan ID Mismatch"}, control_override=mismatch_ids),
-    }
-    return [s for k, s in scenarios.items() if not only or k in only]
-
+    no_extraction = Scenario("no-extraction", lid, no_extraction_doc, False, loan_info(loan), 0, expect_validation="PASSED", folder_batch_path=True)
+    scenarios = [
+        Scenario("happy-path", lid, happy_parts, True, loan_info(loan), 0, expect_validation="PASSED", flaky=2),
+        no_extraction,
+        Scenario("duplicate-resubmission", lid, no_extraction_doc, False, loan_info(loan), 3000, after=no_extraction, expect_description="duplicate"),
+        Scenario("validation-failed", lid, validation_doc, True, loan_info(loan, wrong), 2000,
+                 expect_validation="FAILED", hitl_reject=["sellerLoanNumber", "loanAmount"]),
+        Scenario("precheck-failed", lid, [("cover.pdf", "application/pdf", cover), ("locked.pdf", "application/pdf", password_protected_pdf()),
+                                          ("broken.pdf", "application/pdf", b"%PDF-1.4\n1 0 obj garbage\n")], True, loan_info(loan), 1000,
+                 expect_failed={"locked.pdf": "Password Protected", "broken.pdf": "Corrupted"}),
+        Scenario("control-file-mismatch", lid, [("cover.pdf", "application/pdf", cover)], False, loan_info(loan), 1000,
+                 expect_failed={"controlfile.json": "Loan ID Mismatch"}, control_override=mismatch_ids),
+    ]
+    slices = {"happy-path": (h_first, h_count), "no-extraction": (n_first, n_count), "duplicate-resubmission": (n_first, n_count), "validation-failed": (v_first, v_count)}
+    for s in scenarios:
+        if s.name in slices:
+            s.result["sourcePages"] = f"{loan['file']} pages {slices[s.name][0]}-{slices[s.name][0] + slices[s.name][1] - 1}"
+    return [s for s in scenarios if not only or s.name in only or (s.name == "no-extraction" and "duplicate-resubmission" in only)]
 
 def run(args):
     if not INTEGRATION_URL:

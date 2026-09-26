@@ -1,4 +1,4 @@
-﻿# eOCR simulator
+# eOCR simulator
 
 Test harness that plays the **eOCR partner system** against the ACE integration service, following
 *ACE to eOCR Integration Specification v1.1*. It is not part of the ACE product and can be removed from an
@@ -12,10 +12,20 @@ environment by deleting its `eocrsim` entry in `newrez-ace-infra/config/<env>.js
 Authentication is IAM only: the simulator's task role signs its calls to ACE (SigV4 over VPC Lattice), and
 ACE signs its callbacks to the simulator the same way. There are no keys, tokens or passwords.
 
-Scenarios (`run --only a,b`): `api-contract`, `happy-path` (3 source PDFs, extraction, NOTE validation
-passes, eOCR refuses the first 2 callbacks), `no-extraction`, `validation-failed` (wrong loan amount and
-seller loan number; the harness confirms the mismatches as the HITL reviewer), `precheck-failed`
-(password-protected + corrupt PDF), `control-file-mismatch`.
+Scenarios (`run --only a,b`):
 
-Test data is read from `s3://<config>/test-data/eocr/`: `loan.json` (`{"loanId", "file", "loanInfo"}`) and
-the package PDF it names.
+| Scenario | Package | Expected |
+|---|---|---|
+| `api-contract` | none | unknown aceJobId -> HTTP 200 + 4040; malformed batchPath -> 400 |
+| `happy-path` | 120-159 NOTE-bearing pages split into 3 PDFs, extraction required; eOCR refuses the first 2 callbacks (503) | COMPLETED (0), NOTE validation PASSED, extracted fields, callback retried with the same Idempotency-Key |
+| `no-extraction` | 40-69 pages, one PDF, `extractionRequired=false`, batchPath given as the folder | COMPLETED (0), extraction objects empty |
+| `duplicate-resubmission` | the same PDF as `no-extraction`, new correlationId, after it finishes | PROCESSING_FAILED (3000) naming the duplicate |
+| `validation-failed` | 80-109 pages, wrong loan amount and seller loan number | HITL review (the harness confirms the mismatches as the reviewer) -> VALIDATION_FAILED (2000) with Response.json without extraction |
+| `precheck-failed` | good PDF + password-protected PDF + corrupt PDF | PRECHECK_FAILED (1000) naming both bad files |
+| `control-file-mismatch` | control file loanId differs from the request | PRECHECK_FAILED (1000) naming the control file |
+
+Slice sizes are random per run and differ between scenarios, because ACE marks a package whose page count
+and OCR text match an earlier upload as a DUPLICATE.
+
+Test data is read from `s3://<config>/test-data/eocr/`: `loan.json`
+(`{"loanId", "file", "notePages": [first, last], "loanInfo": {...}}`) and the package PDF it names.
