@@ -143,6 +143,7 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
         return errs + ["Response.json Documents must be a non-empty object"]
     fields = ["fileName", "docTypeId", "docTypeName", "pageRange", "confidencePercentage", "duplicatePagesOf", "extraction"]
     extracted = 0
+    extracted_types = set()
     for doc_type, items in docs.items():
         if not isinstance(items, list) or not items:
             errs.append(f"Documents['{doc_type}'] must be a non-empty array")
@@ -162,12 +163,14 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
                 continue
             for name, field in item["extraction"].items():
                 extracted += 1
+                extracted_types.add(doc_type)
                 if not isinstance(field, dict) or list(field) != ["Value", "cr"]:
                     errs.append(f"Documents['{doc_type}'].extraction['{name}'] must be {{Value, cr}}: {field}")
     if (not extraction_required or expect_validation == "FAILED") and extracted:
         errs.append(f"Response.json has {extracted} extracted fields although extraction must be empty")
-    if extraction_required and expect_validation != "FAILED" and not extracted:
-        errs.append("Response.json has no extracted fields although extraction was required")
+    # full extraction, not just the NOTE extracted for validation: several document types carry fields
+    if extraction_required and expect_validation != "FAILED" and len(extracted_types) < 3:
+        errs.append(f"Response.json has extracted fields in only {sorted(extracted_types)} although whole-package extraction was required")
     if not str(doc.get("fileSize", "")).isdigit():
         errs.append(f"Response.json fileSize {doc.get('fileSize')!r} is not a byte count")
     return errs
@@ -498,6 +501,7 @@ class Scenario:
                 "documentTypes": len(docs),
                 "documents": sum(len(v) for v in docs.values()),
                 "extractedFields": sum(len(i["extraction"]) for v in docs.values() for i in v),
+                "documentTypesWithFields": sorted(k for k, v in docs.items() if any(i["extraction"] for i in v)),
                 "files": sorted({i["fileName"] for v in docs.values() for i in v}),
                 "validationStatus": doc["validationStatus"],
                 "sample": next(iter(docs.items())),
