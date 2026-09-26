@@ -463,10 +463,10 @@ class Scenario:
             self.err(e)
         if not cb["contractErrors"]:
             self.ok("callback payload matches spec 5.1/6.x (fields, code/value, batchPath/failedDocuments rules, timestamp)")
-        if not (cb["callerPrincipal"] or "").endswith("integration-task-role"):
+        if not re.search(r":assumed-role/[\w-]+-integration-task-role/", cb["callerPrincipal"] or ""):
             self.err(f"callback was not signed by the integration task role: {cb['callerPrincipal']}")
         else:
-            self.ok(f"callback authenticated by IAM (Lattice) as {cb['callerPrincipal'].split('/')[-1]}")
+            self.ok(f"callback authenticated by IAM (Lattice) as {cb['callerPrincipal'].split('/')[-2]}")
         if self.flaky:
             refused = [r for r in records if r["answeredWith"] == 503]
             if len(refused) != self.flaky:
