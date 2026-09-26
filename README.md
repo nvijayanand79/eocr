@@ -19,13 +19,13 @@ Scenarios (`run --only a,b`):
 | `api-contract` | none | unknown aceJobId -> HTTP 200 + 4040; malformed batchPath -> 400 |
 | `happy-path` | 120-159 NOTE-bearing pages split into 3 PDFs, extraction required; eOCR refuses the first 2 callbacks (503) | COMPLETED (0), NOTE validation PASSED, extracted fields, callback retried with the same Idempotency-Key |
 | `no-extraction` | 40-69 pages, one PDF, `extractionRequired=false`, batchPath given as the folder | COMPLETED (0), extraction objects empty |
-| `duplicate-resubmission` | the same PDF as `no-extraction`, new correlationId, after it finishes | PROCESSING_FAILED (3000) naming the duplicate |
+| `resubmission` | the same PDF as `no-extraction`, new correlationId, after it finishes | a new aceJobId, COMPLETED (0). (With ACE's duplicate detection switched on, integration would end it as PROCESSING_FAILED naming the original.) |
 | `validation-failed` | 80-109 pages, wrong loan amount and seller loan number | HITL review (the harness confirms the mismatches as the reviewer) -> VALIDATION_FAILED (2000) with Response.json without extraction |
 | `precheck-failed` | good PDF + password-protected PDF + corrupt PDF | PRECHECK_FAILED (1000) naming both bad files |
 | `control-file-mismatch` | control file loanId differs from the request | PRECHECK_FAILED (1000) naming the control file |
 
-Slice sizes are random per run and differ between scenarios, because ACE marks a package whose page count
-and OCR text match an earlier upload as a DUPLICATE.
+Slice sizes are random per run and differ between scenarios, so no two packages are identical (ACE can mark a
+package whose page count and OCR text match an earlier upload as a DUPLICATE when that check is enabled).
 
 Test data is read from `s3://<config>/test-data/eocr/`: `loan.json`
 (`{"loanId", "file", "notePages": [first, last], "loanInfo": {...}}`) and the package PDF it names.

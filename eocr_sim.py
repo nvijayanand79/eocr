@@ -385,6 +385,10 @@ class Scenario:
         if set(resp) != {"aceJobId", "status"} or resp["status"] != {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}:
             self.err(f"onboarding acknowledgement does not match spec 4.2: {resp}")
         self.job = resp["aceJobId"]
+        if self.result.get("sameFilesAs") == self.job:
+            self.err("a new eOCR execution (new correlationId) must get a new aceJobId")
+        elif self.result.get("sameFilesAs"):
+            self.ok(f"same package, new correlationId -> new aceJobId {self.job} (earlier job {self.result['sameFilesAs']})")
         self.result["aceJobId"] = self.job
         self.ok(f"onboarding -> HTTP 202 aceJobId={self.job}")
         if self.flaky:
@@ -507,6 +511,8 @@ class Scenario:
         if self.after is not None:
             self.after.done.wait(timeout_s)
             self.result["startedAfter"] = self.after.name
+        if self.after is not None and self.after.result.get("aceJobId"):
+            self.result["sameFilesAs"] = self.after.result["aceJobId"]
         started = time.time()
         try:
             self.stage()
@@ -574,7 +580,9 @@ def build_scenarios(loan, only):
     scenarios = [
         Scenario("happy-path", lid, happy_parts, True, loan_info(loan), 0, expect_validation="PASSED", flaky=2),
         no_extraction,
-        Scenario("duplicate-resubmission", lid, no_extraction_doc, False, loan_info(loan), 3000, after=no_extraction, expect_description="duplicate"),
+        # same package, new eOCR execution: a new job. (ACE's own duplicate detection, loan.duplicate.logic.flag,
+        # is off in this environment; when on, integration ends such a job as PROCESSING_FAILED naming the original.)
+        Scenario("resubmission", lid, no_extraction_doc, False, loan_info(loan), 0, after=no_extraction, expect_validation="PASSED"),
         Scenario("validation-failed", lid, validation_doc, True, loan_info(loan, wrong), 2000,
                  expect_validation="FAILED", hitl_reject=["sellerLoanNumber", "loanAmount"]),
         Scenario("precheck-failed", lid, [("cover.pdf", "application/pdf", cover), ("locked.pdf", "application/pdf", password_protected_pdf()),
@@ -583,11 +591,11 @@ def build_scenarios(loan, only):
         Scenario("control-file-mismatch", lid, [("cover.pdf", "application/pdf", cover)], False, loan_info(loan), 1000,
                  expect_failed={"controlfile.json": "Loan ID Mismatch"}, control_override=mismatch_ids),
     ]
-    slices = {"happy-path": (h_first, h_count), "no-extraction": (n_first, n_count), "duplicate-resubmission": (n_first, n_count), "validation-failed": (v_first, v_count)}
+    slices = {"happy-path": (h_first, h_count), "no-extraction": (n_first, n_count), "resubmission": (n_first, n_count), "validation-failed": (v_first, v_count)}
     for s in scenarios:
         if s.name in slices:
             s.result["sourcePages"] = f"{loan['file']} pages {slices[s.name][0]}-{slices[s.name][0] + slices[s.name][1] - 1}"
-    return [s for s in scenarios if not only or s.name in only or (s.name == "no-extraction" and "duplicate-resubmission" in only)]
+    return [s for s in scenarios if not only or s.name in only or (s.name == "no-extraction" and "resubmission" in only)]
 
 def run(args):
     if not INTEGRATION_URL:
