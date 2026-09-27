@@ -252,7 +252,12 @@ Everything flagged counts in the *need attention* tile, the Pipeline badge and t
 
 ### Opening it
 
-The console has no login of its own, so by default it binds to `127.0.0.1` inside the task and is not in the
+**Deployed (QA):** `https://<environment CloudFront>/eocr-sim/` - CloudFront + WAF -> internal ALB -> console port 8081
+(`SIM_CONSOLE_HOST=0.0.0.0`, `SIM_BASE_PATH=/eocr-sim`, `SIM_AUTH=ace`, `SIM_PUBLIC_URL` for links in messages). Sign in
+with an ACE user ID or e-mail and password; the console keeps its own session and never uses ACE tokens. The callback
+endpoint (8080) stays Lattice-only. `SIM_NOTIFY_WEBHOOK` needs an internet route, which the QA VPC does not have.
+
+**Without the ALB route:** with `SIM_AUTH=name` the console has no real login, so by default it binds to `127.0.0.1` inside the task and is not in the
 Lattice target group. Open it through ECS Exec / SSM port forwarding (the service needs `enableExecuteCommand` and
 the task role the SSM messages permissions):
 
