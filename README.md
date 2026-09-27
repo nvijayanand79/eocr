@@ -140,7 +140,13 @@ name another endpoint. The execution stores the endpoint it was submitted to (al
 tracker, HITL, close and callback reconciliation for that execution all use it. Set `SIM_ACE_URL_ALLOWED`
 (comma-separated base URLs) to restrict which endpoints may be used: the simulator signs its calls with its task role.
 
-### What is stored (all in the intake bucket, nothing on local disk)
+### What is stored
+
+Loan documents and control files are always in the intake bucket (that is the eOCR contract). The simulator's own
+records are kept by `store.py`: deployed (`SIM_STORE=db`) in its **own schema** `eocrsim` of the environment
+database, through an isolated IAM login that can read nothing of ACE except the sign-in columns of the user table
+(views `eocrsim.executions` and `eocrsim.callbacks` for queries); locally (`SIM_STORE=s3`) as JSON under
+`s3://<intake>/eocr-sim/`. The keys below are the same in both.
 
 | Key | Written | Holds |
 |---|---|---|
