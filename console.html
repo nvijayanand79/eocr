@@ -236,6 +236,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .preset .g { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
 .g-positive { color: var(--ok); } .g-negative { color: var(--bad); } .g-resilience { color: var(--warn); } .g-custom { color: var(--muted); }
 .ok-cell { color: var(--ok); font-weight: 700; } .no-cell { color: var(--bad); font-weight: 700; }
+.hbar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); min-width: 120px; }
+.hbar i { display: block; height: 100%; } .hbar .p { background: var(--ok); } .hbar .f { background: var(--bad); } .hbar .n { background: var(--info); } .hbar .w { background: var(--warn); }
+.hc { display: grid; grid-template-columns: 28px 1fr auto; gap: 12px; align-items: start; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.hc:last-child { border-bottom: 0; } .hc .ic { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
+.hc .ic.y { background: var(--ok-bg); color: var(--ok); } .hc .ic.n { background: var(--bad-bg); color: var(--bad); }
+@media print { .side, .page-head .actions, .no-print { display: none !important; } .app { display: block; } main { padding: 0; } .card { box-shadow: none; break-inside: avoid; } }
 
 /* ---------- overlays */
 #toast { position: fixed; bottom: 20px; right: 20px; max-width: 460px; padding: 12px 16px; border-radius: 10px; background: var(--ink); color: var(--bg); display: none; z-index: 40; box-shadow: 0 8px 24px rgba(0,0,0,.2); font-weight: 500; }
@@ -284,7 +290,9 @@ dialog .d-f { padding: 14px 20px; border-top: 1px solid var(--line); display: fl
       <a href="#/" data-nav="home"><svg class="i"><use href="#i-home"/></svg>Dashboard</a>
       <a href="#/jobs" data-nav="jobs"><svg class="i"><use href="#i-list"/></svg>Jobs<span class="count" id="n-attn" hidden title="jobs needing attention"></span></a>
       <a href="#/callbacks" data-nav="callbacks"><svg class="i"><use href="#i-inbox"/></svg>Callbacks<span class="count" id="n-cb" hidden title="off-spec or unknown callbacks"></span></a>
-      <a href="#/reports" data-nav="reports"><svg class="i"><use href="#i-chart"/></svg>Scenario runs</a>
+      <a href="#/report" data-nav="report"><svg class="i"><use href="#i-chart"/></svg>Report</a>
+      <a href="#/health" data-nav="health"><svg class="i"><use href="#i-heart"/></svg>System health<span class="count" id="n-health" hidden>!</span></a>
+      <a href="#/reports" data-nav="reports"><svg class="i"><use href="#i-list"/></svg>Scenario runs</a>
       <a href="#" id="help"><svg class="i"><use href="#i-help"/></svg>How it works</a>
     </nav>
     <div class="side-foot">
@@ -318,6 +326,8 @@ dialog .d-f { padding: 14px 20px; border-top: 1px solid var(--line); display: fl
   <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></symbol>
   <symbol id="i-ok" viewBox="0 0 24 24"><path d="M22 11.1V12a10 10 0 1 1-5.9-9.1"/><path d="M22 4 12 14l-3-3"/></symbol>
 </svg>
 
@@ -474,7 +484,7 @@ const whoLine = b => b.submittedAt ? `Submitted ${when(b.submittedAt)} by ${esc(
 const took = b => b.submittedAt ? dur(((b.closedAt ? Date.parse(b.closedAt) : Date.now()) - Date.parse(b.submittedAt)) / 1000) : "";
 
 // ================================================================== router
-const NAV = {"": "home", jobs: "jobs", job: "jobs", callbacks: "callbacks", reports: "reports"};
+const NAV = {"": "home", jobs: "jobs", job: "jobs", callbacks: "callbacks", reports: "reports", report: "report", health: "health"};
 async function route() {
   clearInterval(timer); timer = null;
   if (location.hash.length > 1 && !location.hash.startsWith("#/")) { location.replace("#/job/" + location.hash.slice(1)); return; }  // old links
@@ -488,6 +498,8 @@ async function route() {
   if (p[0] === "job" && p[1]) return p[2] === "setup" ? pageWizard(p[1]) : pageJob(p[1], p[2] || "overview");
   if (p[0] === "callbacks") return pageCallbacks();
   if (p[0] === "reports") return pageReports();
+  if (p[0] === "report") return pageReport();
+  if (p[0] === "health") return pageHealth();
   return pageHome();
 }
 window.addEventListener("hashchange", route);
@@ -1237,6 +1249,80 @@ async function pageReports() {
         <td>${x.correlationId ? `<a href="#/job/${encodeURIComponent(x.correlationId)}">${esc(x.correlationId)}</a>` : ""}<div class="mono hint">${esc(x.aceJobId || "")}</div></td>
         <td>${esc(x.minutes ?? "")}</td><td>${(x.errors || []).map(e => `<div style="color:var(--bad)">${esc(e)}</div>`).join("")}</td></tr>`).join("")}</table></div></div>`).join("")}</div>`
     : `<div class="card"><div class="empty">No scenario runs yet.</div></div>`;
+}
+
+// ================================================================== report
+let reportDays = "30";
+async function pageReport() {
+  main().innerHTML = `<div class="page-head"><div><h1>Report</h1><div class="sub">Tests, spec coverage, ACE timing and trends, for sign-off and status updates</div></div>
+    <div class="actions"><select id="r-days"><option value="1">Last 24 hours</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="">All time</option></select>
+      <button class="btn" id="r-json">${icon("download")}JSON</button><button class="btn" id="r-print">${icon("print")}Print / PDF</button></div></div><div id="r-body"><div class="empty">Building the report…</div></div>`;
+  $("#r-days").value = reportDays; $("#r-days").onchange = e => { reportDays = e.target.value; drawReport(); };
+  $("#r-print").onclick = () => window.print();
+  $("#r-json").onclick = async () => { const r = await api("GET", `/api/report?days=${reportDays}`); const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(r, null, 2)], {type: "application/json"})); a.download = `eocr-report-${new Date().toISOString().slice(0, 10)}.json`; a.click(); };
+  await drawReport();
+}
+async function drawReport() {
+  let r; try { r = await api("GET", `/api/report?days=${reportDays}`); } catch (e) { $("#r-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const bar = (parts, total) => `<div class="hbar">${parts.map(([n, c]) => n ? `<i class="${c}" style="width:${100 * n / Math.max(total, 1)}%"></i>` : "").join("")}</div>`;
+  const tp = r.tests.reduce((a, t) => a + t.passed, 0), tf = r.tests.reduce((a, t) => a + t.failed, 0);
+  const exercised = r.spec.filter(c => c.exercised).length, specFailed = r.spec.filter(c => c.failed).length;
+  const maxStage = Math.max(1, ...r.stages.map(x => x.avgSeconds)), maxDay = Math.max(1, ...r.daily.map(d => d.submitted));
+  $("#r-body").innerHTML = `
+    <div class="kpis">
+      <div class="card kpi"><div class="v">${r.submitted}</div><div class="l">jobs submitted to ACE</div></div>
+      <div class="card kpi ${tf ? "bad" : tp ? "ok" : ""}"><div class="v">${tp}/${tp + tf}</div><div class="l">tests passed</div></div>
+      <div class="card kpi ${specFailed ? "bad" : ""}"><div class="v">${exercised}/${r.spec.length}</div><div class="l">spec clauses exercised${specFailed ? ` · ${specFailed} with failures` : ""}</div></div>
+      <div class="card kpi"><div class="v">${r.callback.avgSeconds != null ? dur(r.callback.avgSeconds) : "—"}</div><div class="l">average time to callback${r.callback.p90Seconds != null ? ` · p90 ${dur(r.callback.p90Seconds)}` : ""}</div></div>
+    </div>
+    <div class="stack">
+    <div class="card"><div class="card-h"><h3>Tests</h3><span class="sub">each test's runs in the period, worst first</span></div>
+      ${r.tests.length ? `<div class="tbl"><table><tr><th>Test</th><th>Runs</th><th>Passed</th><th>Failed</th><th style="width:200px"></th><th>Last run</th></tr>
+        ${r.tests.map(t => `<tr><td><b>${esc(t.test)}</b></td><td>${t.runs}</td><td>${t.passed}</td><td style="${t.failed ? "color:var(--bad);font-weight:700" : ""}">${t.failed}</td>
+          <td>${bar([[t.passed, "p"], [t.failed, "f"], [t.pending || 0, "n"]], t.runs)}</td>
+          <td>${t.lastJob ? `<a href="#/job/${encodeURIComponent(t.lastJob)}">${when(t.last)}</a> ${pill(t.lastVerdict || "", {passed: "ok", failed: "bad"}[t.lastVerdict] || "info")}` : "—"}</td></tr>`).join("")}</table></div>`
+        : `<div class="empty">No tests ran in this period.</div>`}
+      ${r.testsNeverRun.length ? `<div class="card-b"><span class="hint">Never run in this period:</span> ${r.testsNeverRun.map(t => pill(t, "warn", "nodot")).join(" ")} <a href="#/new" class="no-print">Start a test</a></div>` : ""}</div>
+    <div class="card"><div class="card-h"><h3>Spec coverage</h3><span class="sub">every clause of the integration spec, across the jobs submitted in the period</span></div>
+      <div class="tbl"><table><tr><th style="width:120px">Spec</th><th>Check</th><th>Passed</th><th>Failed</th><th>Pending</th><th style="width:180px"></th><th>Status</th></tr>
+      ${r.spec.map(c => `<tr><td class="mono">${esc(c.clause)}</td><td>${esc(c.check)}</td><td>${c.passed}</td><td style="${c.failed ? "color:var(--bad);font-weight:700" : ""}">${c.failed}</td><td>${c.pending}</td>
+        <td>${bar([[c.passed, "p"], [c.failed, "f"], [c.pending, "n"]], c.passed + c.failed + c.pending)}</td>
+        <td>${c.failed ? `${pill("failures", "bad")}${c.lastFailedJob ? ` <a href="#/job/${encodeURIComponent(c.lastFailedJob)}/spec">latest</a>` : ""}` : c.exercised ? pill("covered", "ok") : pill("never exercised", "warn")}</td></tr>`).join("")}</table></div></div>
+    <div class="grid2">
+      <div class="card"><div class="card-h"><h3>Time in each ACE stage</h3><span class="sub">average, as reported by the Status API</span></div><div class="card-b">
+        ${r.stages.length ? r.stages.map(x => `<div style="display:grid;grid-template-columns:130px 1fr 110px;gap:10px;align-items:center;margin-bottom:8px">
+          <b>${esc(x.stage)}</b>${bar([[x.avgSeconds, "n"]], maxStage)}<span class="hint">${dur(x.avgSeconds)} avg · max ${dur(x.maxSeconds)}</span></div>`).join("") : `<div class="empty">No stage timings yet.</div>`}</div></div>
+      <div class="card"><div class="card-h"><h3>Outcomes</h3></div><div class="card-b">
+        ${r.outcomes.length ? r.outcomes.map(o => `<div style="display:grid;grid-template-columns:200px 1fr 40px;gap:10px;align-items:center;margin-bottom:8px">
+          <span>${esc(o.outcome)}</span>${bar([[o.count, /^0 /.test(o.outcome) ? "p" : /open/i.test(o.outcome) ? "n" : "f"]], r.submitted)}<b>${o.count}</b></div>`).join("") : `<div class="empty">Nothing submitted.</div>`}</div></div></div>
+    <div class="card"><div class="card-h"><h3>By day</h3><span class="sub">submitted, completed and failed jobs; tests passed and failed</span></div>
+      ${r.daily.length ? `<div class="tbl"><table><tr><th>Day</th><th>Submitted</th><th style="width:260px"></th><th>Completed</th><th>Failed</th><th>Tests passed</th><th>Tests failed</th></tr>
+        ${r.daily.map(d => `<tr><td>${esc(d.day)}</td><td>${d.submitted}</td><td>${bar([[d.completed, "p"], [d.failed, "f"], [d.submitted - d.completed - d.failed, "n"]], maxDay)}</td>
+          <td>${d.completed}</td><td>${d.failed}</td><td>${d.testsPassed}</td><td style="${d.testsFailed ? "color:var(--bad);font-weight:700" : ""}">${d.testsFailed}</td></tr>`).join("")}</table></div>` : `<div class="empty">Nothing submitted.</div>`}</div>
+    <p class="hint">Generated ${when(r.generatedAt, true)}.</p></div>`;
+}
+
+// ================================================================== system health
+async function pageHealth() {
+  main().innerHTML = `<div class="page-head"><div><h1>System health</h1><div class="sub">Everything the simulator needs, checked now</div></div>
+    <div class="actions"><button class="btn" id="hc-test">Send a test notification</button><button class="btn primary" id="hc-run">${icon("refresh")}Check again</button></div></div>
+    <div id="hc-body"><div class="empty">Checking…</div></div>`;
+  $("#hc-run").onclick = e => act(e.currentTarget, drawHealth);
+  $("#hc-test").onclick = e => act(e.currentTarget, () => api("POST", "/api/notify-test"), "Test notification sent");
+  await drawHealth(); every(30000, drawHealth);
+}
+async function drawHealth() {
+  let h; try { h = await api("GET", "/api/health"); } catch (e) { $("#hc-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  $("#n-health").hidden = h.ok;
+  $("#hc-body").innerHTML = `<section class="status-card ${h.ok ? "ok" : "bad"}"><div class="sc-top"><div class="sc-icon">${icon(h.ok ? "ok" : "alert")}</div>
+      <div class="sc-text"><div class="sc-title">${h.ok ? "Everything is working" : `${h.checks.filter(c => !c.ok).length} check(s) failing`}</div><div class="sc-sub">Checked ${when(h.checkedAt)}</div></div></div></section>
+    <div class="grid2" style="grid-template-columns:minmax(0,1.6fr) minmax(0,1fr)">
+      <div class="card">${h.checks.map(c => `<div class="hc"><div class="ic ${c.ok ? "y" : "n"}">${icon(c.ok ? "check" : "x")}</div>
+        <div><b>${esc(c.name)}</b>${c.what ? `<div class="hint">${esc(c.what)}</div>` : ""}<div style="margin-top:3px;${c.ok ? "" : "color:var(--bad)"}">${esc(c.detail)}</div></div>
+        <span class="hint">${c.ms} ms</span></div>`).join("")}</div>
+      <div class="card"><div class="card-h"><h3>Configuration</h3></div><div class="card-b"><dl class="kv">
+        ${Object.entries(h.config).map(([k, v]) => `<dt>${esc(k)}</dt><dd class="mono" style="font-size:12px">${esc(v ?? "—")}</dd>`).join("")}</dl></div></div></div>`;
 }
 
 // ================================================================== settings, help, sign-in

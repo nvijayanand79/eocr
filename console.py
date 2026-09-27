@@ -421,6 +421,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
             b.pop("verdict", None)  # an earlier refusal's verdict no longer applies
     update_batch(cid, change)
     sim.store_submission(cid, request, code, resp)
+    notify_state(cid)
     return get(cid)
 
 
@@ -486,6 +487,7 @@ def close(cid, note=""):
                   + (f": {note}" if note else ""))
     update_batch(cid, change)
     sim.store_outcome(cid)
+    notify_state(cid)
     return get(cid)
 
 
@@ -657,23 +659,246 @@ def reports():
     return out
 
 
+# ------------------------------------------------------------------ notifications (Teams / Slack incoming webhook)
+#
+# SIM_NOTIFY_WEBHOOK is set in the environment only (never from the console): the simulator posts {"text": ...}, which
+# Slack and Teams incoming webhooks both accept. SIM_PUBLIC_URL makes the message link to the job page.
+
+NOTIFY_URL = os.environ.get("SIM_NOTIFY_WEBHOOK", "")
+PUBLIC_URL = os.environ.get("SIM_PUBLIC_URL", "").rstrip("/")
+NOTIFY = {"sent": 0, "failed": 0, "last": None, "lastError": None}
+
+
+def post_webhook(text):
+    import urllib.request
+    req = urllib.request.Request(NOTIFY_URL, data=json.dumps({"text": text}).encode(), method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.status
+
+
+def notify(cid, key, text):
+    """Tell the team once per job and reason. Recorded on the job either way; sent when a webhook is configured."""
+    sent = []
+
+    def change(b):
+        if key in (b.get("notified") or []):
+            return
+        b["notified"] = (b.get("notified") or []) + [key]
+        add_event(b, "notified", text + ("" if NOTIFY_URL else " (no webhook configured: shown here only)"))
+        sent.append(True)
+    try:
+        update_batch(cid, change)
+    except KeyError:
+        return
+    if not sent or not NOTIFY_URL:
+        return
+    link = f"{PUBLIC_URL}{BASE}/#/job/{cid}" if PUBLIC_URL else f"job {cid}"
+
+    def go():
+        try:
+            post_webhook(f"eOCR simulator: {text}\n{link}")
+            NOTIFY.update(sent=NOTIFY["sent"] + 1, last=now_iso(), lastError=None)
+        except Exception as exc:
+            NOTIFY.update(failed=NOTIFY["failed"] + 1, lastError=f"{type(exc).__name__}: {exc}")
+            sim.log("notification failed", correlationId=cid, error=NOTIFY["lastError"])
+    threading.Thread(target=go, daemon=True).start()
+
+
+def notify_state(cid):
+    """Decide from the job what, if anything, the team should hear about."""
+    try:
+        b = get(cid)
+    except KeyError:
+        return
+    who = f"Loan {b['loanId']} ({cid})"
+    wf = ((b.get("status") or {}).get("workflow") or {})
+    if b["state"] in ("SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED"):
+        if wf.get("state") == "HITL_PENDING" and not (b.get("plan") or {}).get("autoHitl"):
+            notify(cid, "hitl", f"{who} is waiting for a HITL review in ACE.")
+        if b.get("callbackOverdue"):
+            notify(cid, "no-callback", f"{who}: ACE finished but has not called back.")
+        updated = datetime_ts(b.get("updatedAt"))
+        if updated and time.time() - updated > sim.STALE_HOURS * 3600:
+            notify(cid, "stale", f"{who}: no progress in ACE for {sim.STALE_HOURS} hours.")
+    elif b["state"] == "REJECTED":
+        notify(cid, "rejected", f"{who}: ACE refused the submission.")
+    elif b["state"] == "CLOSED":
+        v = b.get("verdict") or {}
+        if v.get("status") == "failed":
+            bad = "; ".join(f"{c['what']}: expected {c['expected']}, got {c['actual']}" for c in v.get("checks", []) if not c["ok"])
+            notify(cid, "test-failed", f"TEST FAILED “{v.get('title')}” — {who}: {bad}")
+        elif v.get("status") != "passed":
+            ex = sim.explain(b)
+            if ex.get("tone") in ("bad", "warn"):
+                notify(cid, "closed-problem", f"{who}: {ex.get('headline')}")
+
+
+def datetime_ts(iso):
+    try:
+        return sim.datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+sim.ON_CLOSED.append(notify_state)
+
+
+# ------------------------------------------------------------------ report: tests, spec coverage, timing, trends
+
+def report(days=None):
+    rows = sim.list_batches("", days, limit=10 ** 9)
+    submitted = [r for r in rows if r.get("submittedAt")]
+    out = {"period": days, "jobs": len(rows), "submitted": len(submitted), "generatedAt": now_iso()}
+    outcome = {}
+    for r in submitted:
+        o = r.get("outcome") or {}
+        k = "Refused by ACE" if r["state"] == "REJECTED" else f"{o.get('code')} {o.get('value')}" if r["state"] == "CLOSED" else "Still open"
+        outcome[k] = outcome.get(k, 0) + 1
+    out["outcomes"] = sorted(({"outcome": k, "count": v} for k, v in outcome.items()), key=lambda x: -x["count"])
+    tests = {}
+    for r in rows:
+        if not r.get("verdict"):
+            continue
+        t = tests.setdefault(r.get("testTitle") or "Custom test", {"test": r.get("testTitle") or "Custom test", "preset": r.get("preset"),
+                                                                  "runs": 0, "passed": 0, "failed": 0, "pending": 0, "last": None, "lastJob": None})
+        t["runs"] += 1
+        t[r["verdict"]] = t.get(r["verdict"], 0) + 1
+        if not t["last"] or (r.get("submittedAt") or "") > t["last"]:
+            t["last"], t["lastJob"], t["lastVerdict"] = r.get("submittedAt"), r["correlationId"], r["verdict"]
+    out["tests"] = sorted(tests.values(), key=lambda t: (-t["failed"], t["test"]))
+    catalogue = [(p["title"], p["key"]) for p in PRESETS]
+    out["testsNeverRun"] = [t for t, k in catalogue if t not in tests]
+    clauses = {}
+    for r in submitted:
+        for clause, res in (r.get("spec") or {}).items():
+            c = clauses.setdefault(clause, {"clause": clause, "passed": 0, "failed": 0, "pending": 0, "n/a": 0, "lastFailedJob": None})
+            c[res] = c.get(res, 0) + 1
+            if res == "failed":
+                c["lastFailedJob"] = r["correlationId"]
+    checks = {row["clause"]: row["check"] for row in sim.spec_checklist({"state": "CLOSED", "loanId": "", "correlationId": "", "stages": [],
+                                                                        "documents": [], "events": []})}
+    for c in clauses.values():
+        c["check"] = checks.get(c["clause"], "")
+        c["exercised"] = c["passed"] + c["failed"] > 0
+    out["spec"] = sorted(clauses.values(), key=lambda c: c["clause"])
+    stages = {}
+    for r in submitted:
+        for label, secs in (r.get("stageSecs") or {}).items():
+            st = stages.setdefault(label, [])
+            st.append(secs)
+    out["stages"] = [{"stage": k, "runs": len(v), "avgSeconds": round(sum(v) / len(v), 1), "maxSeconds": max(v)} for k, v in stages.items()]
+    cb = sorted(x for x in (_secs_between(r.get("submittedAt"), r.get("callbackAt")) for r in submitted) if x is not None)
+    out["callback"] = {"count": len(cb), "avgSeconds": round(sum(cb) / len(cb), 1) if cb else None,
+                       "p90Seconds": cb[min(len(cb) - 1, int(len(cb) * 0.9))] if cb else None, "maxSeconds": cb[-1] if cb else None}
+    daily = {}
+    for r in submitted:
+        d = daily.setdefault(r["submittedAt"][:10], {"day": r["submittedAt"][:10], "submitted": 0, "completed": 0, "failed": 0, "testsPassed": 0, "testsFailed": 0})
+        d["submitted"] += 1
+        o = (r.get("outcome") or {}).get("code")
+        if r["state"] == "CLOSED" and o == 0:
+            d["completed"] += 1
+        elif r["state"] in ("CLOSED", "REJECTED"):
+            d["failed"] += 1
+        if r.get("verdict") == "passed":
+            d["testsPassed"] += 1
+        elif r.get("verdict") == "failed":
+            d["testsFailed"] += 1
+    out["daily"] = sorted(daily.values(), key=lambda d: d["day"])
+    return out
+
+
+def _secs_between(a, b):
+    ta, tb = datetime_ts(a), datetime_ts(b)
+    return round(tb - ta, 1) if ta is not None and tb is not None and tb >= ta else None
+
+
+# ------------------------------------------------------------------ system health
+
+TRACKER = {"lastLoop": None, "open": 0, "error": None}
+
+
+def health():
+    import urllib.request
+    checks = []
+
+    def check(name, fn, what=""):
+        t0 = time.time()
+        try:
+            ok, detail = fn()
+        except Exception as exc:
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        checks.append({"name": name, "what": what, "ok": ok, "detail": detail, "ms": round((time.time() - t0) * 1000)})
+
+    def callback_endpoint():
+        with urllib.request.urlopen(f"http://127.0.0.1:{sim.PORT}/eocr/health", timeout=5) as r:
+            return r.status == 200, f"http://…:{sim.PORT}/eocr/callback answers (HTTP {r.status})"
+    check("eOCR callback endpoint", callback_endpoint, "where ACE delivers its callbacks")
+
+    def ace():
+        url = sim.default_ace_url()
+        if not url:
+            return False, "no ACE endpoint configured"
+        code, body = sim.call("GET", "/integration/loan/status/HEALTHCHECK-0", base=url)
+        st = (body or {}).get("status", {}) if isinstance(body, dict) else {}
+        return code == 200, f"{url} Status API: HTTP {code}" + (f", {st.get('code')} {st.get('value')}" if st else "")
+    check("ACE integration service", ace, "the Status API answers (an unknown job should be 4040)")
+
+    def records():
+        store.get().list(sim.SETTINGS_KEY)
+        return True, f"{store.MODE} store ({sim.STORE_LABEL})"
+    check("Simulator records", records, "jobs, callbacks, records, sessions")
+
+    for label, bucket in (("Intake bucket", INTAKE_BUCKET), ("Output bucket", OUTPUT_BUCKET)):
+        check(label, lambda b=bucket: (s3.head_bucket(Bucket=b) is not None, f"s3://{b}"), "readable by the simulator")
+
+    def testdata():
+        s3.head_object(Bucket=sim.TESTDATA_BUCKET, Key=sim.TESTDATA_PREFIX + "loan.json")
+        return True, f"s3://{sim.TESTDATA_BUCKET}/{sim.TESTDATA_PREFIX}loan.json"
+    check("Test loan", testdata, "used by test presets and sample files")
+
+    def tracker_ok():
+        last = TRACKER["lastLoop"]
+        if last is None:
+            return False, "has not run yet"
+        age = time.time() - last
+        return age < max(60, TRACK_INTERVAL_S * 4), f"last pass {round(age)} s ago, {TRACKER['open']} open job(s) followed" + (f"; last error: {TRACKER['error']}" if TRACKER["error"] else "")
+    check("Tracker", tracker_ok, f"polls ACE's Status API every {TRACK_INTERVAL_S} s")
+
+    def last_callback():
+        cbs = sim.list_callbacks(1)
+        return True, f"last callback {cbs[0]['receivedAt']} for {cbs[0]['aceJobId']}" if cbs else "no callback received yet"
+    check("Callbacks received", last_callback)
+
+    check("Notifications", lambda: (not NOTIFY["lastError"], (f"webhook configured; {NOTIFY['sent']} sent, {NOTIFY['failed']} failed"
+                                                              + (f"; last error: {NOTIFY['lastError']}" if NOTIFY["lastError"] else "")) if NOTIFY_URL
+                                                             else "no webhook configured (SIM_NOTIFY_WEBHOOK): attention items show in the console only"))
+    return {"ok": all(c["ok"] for c in checks), "checkedAt": now_iso(), "checks": checks,
+            "config": {"auth": AUTH, "store": store.MODE, "basePath": BASE or "/", "aceDefault": sim.default_ace_url(), "aceEnvironment": sim.INTEGRATION_URL,
+                       "trackIntervalSeconds": TRACK_INTERVAL_S, "callbackGraceSeconds": sim.CALLBACK_GRACE_S, "staleHours": sim.STALE_HOURS,
+                       "notifications": bool(NOTIFY_URL), "publicUrl": PUBLIC_URL or None}}
+
+
 # ------------------------------------------------------------------ tracker: follows open executions with the Status API
 
 def tracker():
     while True:
         try:
             keys = [o.key for o in store.get().list(sim.ACTIVE_PREFIX)]
+            TRACKER.update(open=len(keys))
             for key in keys:
                 cid = key[len(sim.ACTIVE_PREFIX):]
                 try:
                     batch = sim.refresh_status(cid)
                     if batch:
                         auto_hitl(batch)
+                        notify_state(cid)
                 except KeyError:
                     store.get().delete(key)
                 except Exception as exc:
                     sim.log("tracker: status refresh failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
-        except Exception:
+            TRACKER.update(lastLoop=time.time(), error=None)
+        except Exception as exc:
+            TRACKER.update(error=f"{type(exc).__name__}: {exc}")
             sim.log("tracker failed", trace=traceback.format_exc()[-1500:])
         time.sleep(TRACK_INTERVAL_S)
 
@@ -987,6 +1212,29 @@ def _exchanges(h, q, cid):
 @route("GET", CID + r"/evidence\.zip")
 def _evidence(h, q, cid):
     return evidence(cid, q.get("documents") == "1")
+
+
+@route("GET", r"/api/report")
+def _report(h, q):
+    return report(q.get("days") or None)
+
+
+@route("GET", r"/api/health")
+def _health(h, q):
+    return health()
+
+
+@route("POST", r"/api/notify-test")
+def _notify_test(h, q):
+    if not NOTIFY_URL:
+        raise Conflict("no webhook configured: set SIM_NOTIFY_WEBHOOK")
+    try:
+        code = post_webhook(f"eOCR simulator: test notification sent by {sim.operator()} at {now_iso()}")
+        NOTIFY.update(sent=NOTIFY["sent"] + 1, last=now_iso(), lastError=None)
+    except Exception as exc:
+        NOTIFY.update(failed=NOTIFY["failed"] + 1, lastError=f"{type(exc).__name__}: {exc}")
+        raise ValueError(f"the webhook refused it: {NOTIFY['lastError']}") from None
+    return {"sent": True, "httpStatus": code}
 
 
 @route("GET", r"/api/reports")

@@ -61,7 +61,7 @@ step traced end to end.
   - tabs: *Overview* (what was sent and what came back), *Files in S3* (the input folder, ACE's output folder and
     the simulator records, with role, size, time, view and download), *Result*, *Validation*, *Callbacks*,
     *Spec compliance*, *Activity*.
-- **Callbacks** and **Scenario runs**.
+- **Callbacks**, **Report**, **System health** and **Scenario runs**.
 
 **Tests.** New job starts with *What do you want to test?*: happy path, classification only, package in several files,
 eOCR endpoint down for 2 callbacks, password-protected file, corrupt file, document missing from the folder, control
@@ -77,6 +77,22 @@ identical repeated polls folded into one line); the *ACE exchanges* tab shows th
 **Evidence** downloads one zip per job: `SUMMARY.txt` (what happened, the verdict, the stages, the deviations),
 the control file ACE read, the job record, submission and outcome records, callbacks, the exchange log, ACE's output,
 the checklist, validation and an S3 listing (`?documents=1` adds the PDFs).
+
+**Report.** One page (and `GET /api/report?days=N`) for sign-off and status updates over the last 1, 7, 30 or 90
+days: jobs submitted, tests passed per test (worst first, with tests never run), spec coverage per clause (passed,
+failed, pending, with a link to the latest failing job), average time in each ACE stage, time to callback (average,
+p90, max), outcomes, and totals by day. **JSON** downloads it; **Print / PDF** prints it without the navigation.
+
+**System health.** `GET /api/health` and the *System health* page check, each with its time: the eOCR callback
+endpoint answers, ACE's Status API answers an unknown job with `4040 JOB_NOT_FOUND`, the job store, the intake and
+output buckets, the test loan, the tracker's last pass, the last callback received and notifications; plus the
+configuration in use. *Send a test notification* posts one message to the webhook.
+
+**Notifications.** With `SIM_NOTIFY_WEBHOOK` set (Slack, Teams or any endpoint taking `{"text": "..."}`), the console
+posts once per job and reason when: a HITL review is waiting (not for tests that answer it themselves), ACE finished
+but has not called back, an open job has made no progress for 24 h, ACE refused a submission, a test failed (with
+each failed check), or a job closed with a problem. Passing tests and clean completions stay quiet. Each message links
+to the job when `SIM_PUBLIC_URL` is set, and is also recorded in the job's activity whether or not it was sent.
 
 "Resubmit as new job" copies the package into a new job and opens its wizard at *Documents*, so the failing files
 can be replaced first. Files are viewed inline only for PDF, images, JSON and text, and every file response is
@@ -254,6 +270,8 @@ the intake bucket, read the output bucket and the test data.
 | `SIM_AUTH` | `name` | `name` (sign-in screen) or `oidc` (ALB single sign-on, verified) |
 | `SIM_ALB_ARN` | | with `oidc`: only tokens signed by this ALB are accepted |
 | `SIM_OIDC_USER_CLAIMS` | `email,preferred_username,name,sub` | with `oidc`: which claim names the user |
+| `SIM_NOTIFY_WEBHOOK` | | URL to post notifications to (`{"text": ...}` JSON) |
+| `SIM_PUBLIC_URL` | | the console's address as people open it, for links in notifications |
 
 ### Trying it locally (no AWS)
 

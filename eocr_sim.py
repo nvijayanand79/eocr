@@ -756,6 +756,9 @@ def _summary(b):
            "validationFindings": len((b.get("validation") or {}).get("findings") or []),
            "verdict": (b.get("verdict") or {}).get("status") or ("pending" if b.get("expectation") and b["state"] not in ("CLOSED", "REJECTED") else None),
            "testTitle": (b.get("expectation") or {}).get("title"),
+           "preset": (b.get("expectation") or {}).get("preset"),
+           "spec": {r["clause"]: r["result"] for r in spec_checklist(b)},
+           "stageSecs": {st["label"]: st["seconds"] for st in stage_track(b) if st["side"] == "ACE" and st.get("seconds") is not None},
            "validationStatus": (b.get("validation") or {}).get("validationStatus"),
            "lastEvent": ((b.get("events") or [None])[-1] or {}).get("message")}
 
@@ -944,7 +947,8 @@ def save_default_ace_url(url):
 
 
 STORE_LABEL = f"db:{store.SCHEMA}.object/" if store.MODE == "db" else f"s3://{INTAKE_BUCKET}/"
-RECORD_PREFIX = f"{SIM_PREFIX}records/"   # immutable per-execution records: what was submitted, how it ended
+RECORD_PREFIX = f"{SIM_PREFIX}records/"
+ON_CLOSED = []  # callables(cid) run after a job closes on its callback (the console registers its notifier)   # immutable per-execution records: what was submitted, how it ended
 
 
 def _put_record(cid, name, doc):
@@ -1141,6 +1145,11 @@ def on_callback(job_id, record):
 
     update_batch(cid, close)
     store_outcome(cid)
+    for hook in ON_CLOSED:
+        try:
+            hook(cid)
+        except Exception as exc:
+            log("on-closed hook failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
 
 
 # ------------------------------------------------------------------ callback receiver (serve)
