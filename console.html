@@ -229,6 +229,13 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .checks li { display: flex; gap: 8px; font-size: 13px; align-items: flex-start; }
 .checks .y { color: var(--ok); } .checks .n { color: var(--warn); }
 .json .k { color: var(--brand); } .json .s { color: var(--ok); }
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
+.preset { text-align: left; font: inherit; color: inherit; background: var(--surface); border: 1.5px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; display: grid; gap: 4px; }
+.preset:hover { border-color: var(--line-2); } .preset.on { border-color: var(--brand); background: var(--brand-soft); }
+.preset b { font-size: 13.5px; } .preset span { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.preset .g { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.g-positive { color: var(--ok); } .g-negative { color: var(--bad); } .g-resilience { color: var(--warn); } .g-custom { color: var(--muted); }
+.ok-cell { color: var(--ok); font-weight: 700; } .no-cell { color: var(--bad); font-weight: 700; }
 
 /* ---------- overlays */
 #toast { position: fixed; bottom: 20px; right: 20px; max-width: 460px; padding: 12px 16px; border-radius: 10px; background: var(--ink); color: var(--bg); display: none; z-index: 40; box-shadow: 0 8px 24px rgba(0,0,0,.2); font-weight: 500; }
@@ -450,6 +457,7 @@ function attentionReasons(b) {
   if (OPEN(b) && Date.now() - Date.parse(b.updatedAt) > STALE_H * 3600e3) r.push(`no progress for ${STALE_H} h+`);
   if (b.state === "REJECTED") r.push("ACE refused the submission");
   const n = issuesOf(b); if (n) r.push(`${n} spec / validation issue${n > 1 ? "s" : ""}`);
+  if (b.verdict === "failed" || (b.verdict && b.verdict.status === "failed")) r.push("test failed");
   return r;
 }
 function mini(b) {  // Prepared · Submitted · ACE processing · Callback · Closed
@@ -516,6 +524,8 @@ async function drawHome() {
       ${kpi(failed.length, "failed or refused", "#/jobs?f=failed", failed.length ? "bad" : "")}
       ${kpi(timed.length ? dur(timed.reduce((a, x) => a + x, 0) / timed.length) : "—", "average time to ACE's callback", "#/jobs")}
       ${kpi(attn.length, "need your attention", "#/jobs?f=attention", attn.length ? "bad" : "")}
+      ${(() => { const t = items.filter(b => b.verdict === "passed" || b.verdict === "failed"), pass = t.filter(b => b.verdict === "passed").length;
+        return kpi(t.length ? `${pass}/${t.length}` : "—", "tests passed", "#/jobs?f=tests", t.length && pass < t.length ? "bad" : t.length ? "ok" : ""); })()}
     </div>
     <div class="grid2">
       <div class="card"><div class="card-h">${icon("alert")}<h3>Needs attention</h3><span class="sub">${attn.length}</span><a class="right" href="#/jobs?f=attention">View all</a></div>
@@ -531,7 +541,7 @@ async function drawHome() {
 }
 
 // ================================================================== jobs list
-const FILTERS = [["", "All"], ["attention", "Needs attention"], ["running", "In progress"], ["setup", "Drafts"], ["ok", "Completed"], ["failed", "Failed"], ["done", "Finished"]];
+const FILTERS = [["", "All"], ["attention", "Needs attention"], ["running", "In progress"], ["setup", "Drafts"], ["ok", "Completed"], ["failed", "Failed"], ["tests", "Tests"], ["done", "Finished"]];
 let jobsState = {f: "", q: "", days: "", mine: false, offset: 0};
 async function pageJobs() {
   const hq = new URLSearchParams(location.hash.split("?")[1] || ""); if (hq.has("f")) { jobsState.f = hq.get("f"); jobsState.offset = 0; }
@@ -557,11 +567,13 @@ async function drawJobs() {
   if (["attention", "running", "setup"].includes(f)) params.set("state", f);
   if (f === "ok" || f === "failed") params.set("result", f);
   if (f === "done") params.set("state", "CLOSED");
+  if (f === "tests") params.set("test", "1");
   if (jobsState.mine) params.set("mine", "1");
   let page; try { page = await api("GET", "/api/batches?" + params); } catch (e) { $("#j-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  $("#j-body").innerHTML = page.items.length ? `<div class="tbl"><table><tr><th>Status</th><th>Job</th><th>Progress</th><th>Where it is</th><th>Submitted</th><th>Took</th><th></th></tr>
+  $("#j-body").innerHTML = page.items.length ? `<div class="tbl"><table><tr><th>Status</th><th>Test</th><th>Job</th><th>Progress</th><th>Where it is</th><th>Submitted</th><th>Took</th><th></th></tr>
     ${page.items.map(b => { const s = statusOf(b), wf = wfOf(b), why = attentionReasons(b);
       return `<tr class="click" data-go="${esc(b.correlationId)}"><td>${pill(s.label, s.tone)}</td>
+        <td>${b.verdict ? pill(VERDICT[b.verdict][0].replace("Test ", ""), VERDICT[b.verdict][1]) + (b.testTitle ? `<div class="hint">${esc(b.testTitle)}</div>` : "") : `<span class="hint">—</span>`}</td>
         <td><div style="font-weight:600">Loan ${esc(b.loanId)}</div><div class="mono hint">${esc(b.correlationId)}</div>${b.aceJobId ? `<div class="mono hint">${esc(b.aceJobId)}</div>` : ""}</td>
         <td>${mini(b)}</td>
         <td>${b.state === "CLOSED" ? esc((b.outcome || {}).description || "") : OPEN(b) ? `ACE: ${esc(wf.stage || "queued")}${wf.state ? " · " + esc(wf.state) : ""}` : esc(s.label)}
@@ -578,9 +590,11 @@ async function drawJobs() {
 
 // ================================================================== new job wizard
 const WZ = [["Loan details", "goes into the control file"], ["Documents", "uploaded to the S3 folder"], ["Control file", "generated, editable"], ["Check S3 folder", "what ACE will read"], ["Submit", "call ACE"]];
-let wz = null;
+let wz = null, presets = null;
+const GROUP = {positive: "Should succeed", negative: "Should fail", resilience: "Resilience"};
+const EXPECT_LABEL = {0: "0 Completed", 1000: "1000 Pre-check failed", 2000: "2000 Validation failed", 3000: "3000 Processing failed", REJECTED: "Refused by ACE"};
 async function pageWizard(cid) {
-  wz = {cid, batch: null, step: 0, uploads: {}, extraLoan: null, cf: null, cfMode: "form"};
+  wz = {cid, batch: null, step: 0, uploads: {}, extraLoan: null, cf: null, cfMode: "form", preset: null, exp: undefined};
   if (cid) {
     try { wz.batch = await api("GET", "/api/batches/" + encodeURIComponent(cid)); } catch (e) { main().innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     if (!["DRAFT", "STAGED", "REJECTED"].includes(wz.batch.state)) { location.replace(`#/job/${encodeURIComponent(cid)}`); return; }
@@ -625,9 +639,18 @@ function wzSide() {
     ${docs.length ? `<ul class="checks" style="margin-top:10px">${docs.map(d => `<li>${icon("file")}<span class="mono" style="font-size:12px;word-break:break-all">${esc(d.fileName)}</span><span class="spacer"></span><span class="hint">${bytes(d.bytes)}</span></li>`).join("")}</ul>` : ""}
   </div></div>`;
 }
-function wzLoan() {
+async function wzLoan() {
   const b = wz.batch, li = b ? b.loanInfo : {};
-  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Loan details</h2><p class="hint" style="margin:4px 0 18px">These values go into the control file's <span class="mono">loanInfo</span>.
+  if (!b && !presets) { try { presets = await api("GET", "/api/presets"); } catch (e) { presets = []; } }
+  const picked = !b && wz.preset ? presets.find(p => p.key === wz.preset) : null;
+  $("#wz-body").innerHTML = `${b ? (b.expectation ? `<div class="status-card info" style="padding:10px 14px;margin-bottom:16px">Test: <b>${esc(b.expectation.title)}</b>. The expected outcome can be changed in the Submit step.</div>` : "")
+    : `<h2 style="font-size:17px">What do you want to test?</h2><p class="hint" style="margin:4px 0 12px">A test prepares the package for you and states what ACE should do;
+      the job then ends as <b>test passed</b> or <b>test failed</b>. Or start from scratch.</p>
+    <div class="presets" id="w-presets">${presets.map(p => `<button class="preset ${wz.preset === p.key ? "on" : ""}" data-preset="${esc(p.key)}">
+        <span class="g g-${esc(p.group)}">${esc(GROUP[p.group] || p.group)}</span><b>${esc(p.title)}</b><span>${esc(p.what)}</span></button>`).join("")}
+      <button class="preset ${!wz.preset ? "on" : ""}" data-preset=""><span class="g g-custom">Custom</span><b>Start from scratch</b><span>Your own loan data and files; set an expected outcome at submit if you like.</span></button></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">`}
+    <h2 style="font-size:17px">Loan details</h2><p class="hint" style="margin:4px 0 18px">These values go into the control file's <span class="mono">loanInfo</span>.
       ACE checks them against the NOTE, so a wrong value here is how you test a validation failure.</p>
     <div class="form-grid">
       <label class="field"><span>Loan ID <span class="req">*</span></span><input id="w-loan" value="${esc(b ? b.loanId : "")}" ${b ? "disabled" : ""}><small>Names the S3 folder: loanId=&lt;this&gt;</small></label>
@@ -644,11 +667,16 @@ function wzLoan() {
       <details><summary>Advanced</summary><div class="form-grid" style="margin-top:10px">
         <label class="field"><span>Control file name</span><input id="w-cf" value="${esc(b ? b.controlFileName : "controlfile.json")}" ${b ? "disabled" : ""}></label></div></details>
     </div>
-    <div style="margin-top:18px"><button class="btn sm" id="w-fill">${icon("file")}Fill from the environment's test loan</button></div>`;
-  $("#w-fill").onclick = e => act(e.currentTarget, () => api("GET", "/api/testloan")).then(t => {
-    if (!t) return; if (t.error) return toast("No test loan: " + t.error, true);
-    if (!wz.batch) $("#w-loan").value = t.loanId; const l = t.loanInfo || {}; wz.extraLoan = l;
-    $("#w-seller").value = l.sellerLoanNumber || ""; $("#w-amount").value = l.loanAmount || ""; $("#w-borrower").value = l.borrowerLastName || ""; });
+    <div style="margin-top:18px"><button class="btn sm" id="w-fill">${icon("file")}Fill from the environment's test loan</button></div>
+    ${picked ? `<p class="hint" style="margin-top:14px">${icon("info")} This test stages ${esc(picked.docs.map(d => d[0] === "package" ? `a ${d[1]}-page package slice` : d[0] === "locked" ? "locked.pdf" : "broken.pdf").join(" and "))}${picked.flaky ? `, refuses the first ${picked.flaky} callbacks` : ""}${picked.autoHitl && picked.autoHitl.length ? ", and answers ACE's HITL review itself" : ""}. You can change any of it in the next steps.</p>` : ""}`;
+  const fillTest = async () => { const t = await api("GET", "/api/testloan"); if (t.error) throw new Error("No test loan: " + t.error);
+    if (!wz.batch) $("#w-loan").value = t.loanId; const l = {...(t.loanInfo || {}), ...((picked || {}).loanInfo || {})}; wz.extraLoan = t.loanInfo || {};
+    $("#w-seller").value = l.sellerLoanNumber || ""; $("#w-amount").value = l.loanAmount || ""; $("#w-borrower").value = l.borrowerLastName || ""; return t; };
+  $$("#w-presets [data-preset]").forEach(x => x.onclick = async () => { wz.preset = x.dataset.preset || null; const keep = {loan: $("#w-loan").value, cid: $("#w-cid").value};
+    await wzLoan(); $("#w-loan").value = keep.loan; $("#w-cid").value = keep.cid;
+    const p = presets.find(q => q.key === wz.preset);
+    if (p) { if ("extraction" in p) $("#w-extract").checked = p.extraction !== false; await act(null, fillTest); if (keep.loan) $("#w-loan").value = keep.loan; } });
+  $("#w-fill").onclick = e => act(e.currentTarget, fillTest);
   wzFoot(wz.batch ? "Save and continue" : "Create the job and continue", async btn => {
     const loanInfo = {...(wz.batch ? wz.batch.loanInfo : wz.extraLoan || {}), sellerLoanNumber: $("#w-seller").value.trim(), loanAmount: $("#w-amount").value.trim(), borrowerLastName: $("#w-borrower").value.trim()};
     const missing = [["sellerLoanNumber", "Seller loan number"], ["loanAmount", "Loan amount"], ["borrowerLastName", "Borrower last name"]].filter(([k]) => !loanInfo[k]).map(([, l]) => l);
@@ -656,7 +684,8 @@ function wzLoan() {
     if (missing.length && !confirm(`${missing.join(", ")} ${missing.length > 1 ? "are" : "is"} empty. The spec requires ${missing.length > 1 ? "them" : "it"} in the control file. Continue anyway (a negative test)?`)) return;
     if (!wz.batch) {
       const r = await act(btn, () => api("POST", "/api/batches", {loanId: $("#w-loan").value.trim(), correlationId: $("#w-cid").value.trim(), loanInfo,
-        extractionRequired: $("#w-extract").checked, controlFileName: $("#w-cf").value.trim()}), "Job created");
+        extractionRequired: $("#w-extract").checked, controlFileName: $("#w-cf").value.trim(), preset: wz.preset || undefined}),
+        wz.preset ? "Job created and the test package staged" : "Job created");
       if (!r) return;
       wz.cid = r.correlationId; history.replaceState(null, "", `#/job/${encodeURIComponent(r.correlationId)}/setup`);
     } else if (!await act(btn, () => api("PUT", `/api/batches/${encodeURIComponent(wz.cid)}/control`, {loanInfo, extractionRequired: $("#w-extract").checked}))) return;
@@ -847,6 +876,9 @@ async function wzFolder() {
 }
 function wzSubmit() {
   const b = wz.batch, rejected = b.state === "REJECTED", ev = (b.events || []).filter(e => e.type === "rejected").pop();
+  const plan = b.plan || {};
+  if (wz.exp === undefined) { wz.exp = b.expectation ? clone(b.expectation) : null; wz.autoHitl = plan.autoHitl || []; }
+  const exp = wz.exp;
   const preview = mode => ({loanId: b.loanId, correlationId: b.correlationId, batchPath: mode === "folder" ? b.folder : b.folder + b.controlFileName});
   $("#wz-body").innerHTML = `<h2 style="font-size:17px">Submit to ACE</h2><p class="hint" style="margin:4px 0 16px">The console calls ACE's onboarding API (spec 4). ACE answers with an ACE job ID and
       then works in the background; the job page follows it stage by stage.</p>
@@ -858,9 +890,45 @@ function wzSubmit() {
       <label class="field"><span>Simulate an eOCR outage</span><select id="s-flaky"><option value="0">No: accept the first callback</option><option value="1">Refuse the first callback (503)</option>
         <option value="2">Refuse the first 2 callbacks</option><option value="3">Refuse the first 3 callbacks</option></select><small>Proves ACE retries its callback</small></label>
     </div>
+    <div class="card" style="box-shadow:none;margin-top:18px"><div class="card-h"><h3>What should happen</h3><span class="sub">the job ends as test passed or failed</span>
+      <label class="switch right" style="align-items:center"><input type="checkbox" id="x-on" ${exp ? "checked" : ""}><span>Check the outcome</span></label></div>
+      <div class="card-b" id="x-body" ${exp ? "" : "hidden"}></div></div>
     <div style="font-weight:600;margin:16px 0 6px">Request that will be sent</div><pre class="json" id="s-req">${jsonHtml(preview("file"))}</pre>`;
   $("#s-mode").onchange = e => $("#s-req").innerHTML = jsonHtml(preview(e.target.value));
+  $("#s-flaky").value = String(plan.flaky || 0);
+  const drawExp = () => {
+    const e = wz.exp || (wz.exp = {title: "Custom test", code: 0, failedDocuments: [], specClean: true});
+    $("#x-body").innerHTML = `<div class="form-grid">
+        <label class="field"><span>Test name</span><input id="x-title" value="${esc(e.title || "")}"></label>
+        <label class="field"><span>Expected outcome</span><select id="x-code"><option value="">any outcome</option>${Object.entries(EXPECT_LABEL).map(([k, l]) =>
+          `<option value="${k}" ${String(e.code ?? "") === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <label class="field"><span>NOTE validation</span><select id="x-vs"><option value="">not checked</option>${["PASSED", "FAILED", "NA"].map(v => `<option ${e.validationStatus === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+        <label class="field"><span>ACE's description mentions</span><input id="x-desc" value="${esc((e.descriptionContains || []).join(", "))}" placeholder="comma-separated, e.g. Loan Amount"></label>
+        <label class="field"><span>Callback delivered on attempt</span><input id="x-att" type="number" min="1" value="${esc(e.minCallbackAttempts || "")}" placeholder="any"><small>or later; pair with the outage above</small></label>
+        <label class="field"><span>Answer ACE's HITL review</span><input id="x-hitl" value="${esc((wz.autoHitl || []).join(", "))}" placeholder="fields to mark as mismatched"><small>empty: a person answers it</small></label>
+      </div>
+      <div style="margin-top:14px"><div style="font-weight:600;font-size:12.5px;margin-bottom:6px">Documents ACE should reject at pre-check</div>
+        <div id="x-docs">${(e.failedDocuments || []).map((f, i) => `<div class="toolbar" style="margin-bottom:6px"><input class="mono" data-fn="${i}" value="${esc(f.documentName)}" placeholder="file name" list="x-files" style="flex:1">
+          <input data-fr="${i}" value="${esc(f.reason || "")}" placeholder="reason contains (optional)" style="flex:1"><button class="btn sm ghost danger" data-fx="${i}">${icon("x")}</button></div>`).join("") || `<span class="hint">none</span>`}</div>
+        <datalist id="x-files">${[...b.documents.map(d => d.fileName), b.controlFileName].map(n => `<option value="${esc(n)}">`).join("")}</datalist>
+        <button class="btn sm" id="x-adddoc" style="margin-top:6px">${icon("plus")}Add a document</button></div>
+      <label class="switch" style="margin-top:14px"><input type="checkbox" id="x-spec" ${e.specClean !== false ? "checked" : ""}><span><b>ACE must follow the spec</b><div class="hint">no spec deviations or validation findings</div></span></label>`;
+    const sync = () => { e.title = $("#x-title").value; const c = $("#x-code").value; e.code = c === "" ? null : c === "REJECTED" ? c : +c;
+      e.validationStatus = $("#x-vs").value || null; e.descriptionContains = $("#x-desc").value.split(",").map(t => t.trim()).filter(Boolean);
+      e.minCallbackAttempts = +$("#x-att").value || null; e.specClean = $("#x-spec").checked;
+      wz.autoHitl = $("#x-hitl").value.split(",").map(t => t.trim()).filter(Boolean);
+      e.failedDocuments = $$("[data-fn]").map(x => ({documentName: x.value.trim(), reason: $(`[data-fr="${x.dataset.fn}"]`).value.trim()})).filter(f => f.documentName); };
+    $("#x-body").oninput = sync; $("#x-body").onchange = sync;
+    $("#x-adddoc").onclick = () => { sync(); e.failedDocuments.push({documentName: "", reason: ""}); drawExp(); };
+    $$("[data-fx]").forEach(x => x.onclick = () => { sync(); e.failedDocuments.splice(+x.dataset.fx, 1); drawExp(); });
+  };
+  $("#x-on").onchange = ev => { $("#x-body").hidden = !ev.target.checked; if (ev.target.checked) drawExp(); };
+  if (exp) drawExp();
   wzFoot(rejected ? "Submit again" : "Submit to ACE", async btn => {
+    const want = $("#x-on").checked ? wz.exp : null;
+    if (!same(want, b.expectation ?? null) || !same(wz.autoHitl || [], plan.autoHitl || [])) {
+      if (!await act(btn, () => api("PUT", `/api/batches/${encodeURIComponent(b.correlationId)}/expectation`, {expectation: want, autoHitl: wz.autoHitl || []}))) return;
+    }
     const r = await act(btn, () => api("POST", `/api/batches/${encodeURIComponent(b.correlationId)}/submit`, {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}));
     if (!r) return;
     toast(r.state === "REJECTED" ? "ACE refused the submission. The job page explains why." : `Accepted by ACE: ${r.aceJobId}`, r.state === "REJECTED");
@@ -869,7 +937,18 @@ function wzSubmit() {
 }
 
 // ================================================================== job page
-const TABS = [["overview", "Overview"], ["files", "Files in S3"], ["result", "Result"], ["validation", "Validation"], ["callbacks", "Callbacks"], ["spec", "Spec compliance"], ["activity", "Activity"]];
+const TABS = [["overview", "Overview"], ["files", "Files in S3"], ["result", "Result"], ["validation", "Validation"], ["callbacks", "Callbacks"], ["exchanges", "ACE exchanges"], ["spec", "Spec compliance"], ["activity", "Activity"]];
+const VERDICT = {passed: ["Test passed", "ok"], failed: ["Test failed", "bad"], pending: ["Test running", "info"]};
+function verdictCard(b) {
+  const v = b.verdict; if (!v) return "";
+  const [label, tone] = VERDICT[v.status] || ["Test", "idle"];
+  return `<section class="status-card ${tone}" style="padding:14px 18px"><div class="sc-top"><div class="sc-icon">${icon(v.status === "passed" ? "ok" : v.status === "failed" ? "x" : "clock")}</div>
+      <div class="sc-text"><div class="sc-title">${esc(label)}: ${esc(v.title || "custom test")}</div>
+        <div class="sc-sub">${v.status === "passed" ? "Everything the test expected happened." : v.status === "failed" ? "What happened differs from what the test expected:" : "Checked when the job ends."}</div></div></div>
+    <div class="sc-body"><div class="tbl"><table><tr><th>Check</th><th>Expected</th><th>Actual</th><th style="width:60px"></th></tr>
+      ${v.checks.map(c => `<tr><td>${esc(c.what)}</td><td class="mono">${esc(c.expected)}</td><td class="mono">${c.actual == null ? `<span class="hint">pending</span>` : esc(c.actual)}</td>
+        <td>${c.actual == null ? "" : c.ok ? `<span class="ok-cell">${icon("check")}</span>` : `<span class="no-cell">${icon("x")}</span>`}</td></tr>`).join("")}</table></div></div></section>`;
+}
 let job = null;
 async function pageJob(cid, tab) {
   if (!job || job.correlationId !== cid) main().innerHTML = `<div class="empty">Loading…</div>`;
@@ -888,22 +967,25 @@ function drawJob(tab) {
     validation: ((b.validation || {}).findings || []).length, callbacks: (b.callbacks || []).filter(c => c.contractErrors.length).length};
   const setup = ["DRAFT", "STAGED", "REJECTED"].includes(b.state);
   main().innerHTML = `<div class="crumbs"><a href="#/jobs">Jobs</a> / ${esc(b.correlationId)}</div>
-    <div class="job-head"><h1>Loan ${esc(b.loanId)}</h1>${pill(s.label, s.tone, "big")}
+    <div class="job-head"><h1>Loan ${esc(b.loanId)}</h1>${pill(s.label, s.tone, "big")}${b.verdict ? pill(VERDICT[b.verdict.status][0], VERDICT[b.verdict.status][1], "big") : ""}
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
         ${setup ? `<a class="btn primary" href="#/job/${cid}/setup">${icon("arrow")}${b.state === "REJECTED" ? "Fix and submit again" : "Continue setup"}</a>` : ""}
         ${b.aceJobId && b.state !== "CLOSED" ? `<button class="btn" id="a-refresh">${icon("refresh")}Check ACE now</button>` : ""}
         ${b.documents.length && !setup ? `<button class="btn" id="a-resubmit" title="Same documents and loan data, new correlationId">${icon("copy")}Resubmit as new job</button>` : ""}
-        ${b.state !== "CLOSED" ? `<button class="btn danger" id="a-close">${icon("x")}Close…</button>` : ""}</div></div>
+        ${b.state !== "CLOSED" ? `<button class="btn danger" id="a-close">${icon("x")}Close…</button>` : ""}
+        <a class="btn" href="${BASE}/api/batches/${cid}/evidence.zip" title="Summary, control file, records, callbacks, ACE exchanges, result and checks in one zip">${icon("download")}Evidence</a></div></div>
     <div class="facts"><span>Job <b class="mono">${esc(b.correlationId)}</b></span><span>ACE job <b class="mono">${esc(b.aceJobId || "—")}</b></span>
       <span>${whoLine(b)}</span>${b.submittedAt ? `<span>${b.closedAt ? "Took" : "Running for"} <b>${took(b)}</b></span>` : ""}
       ${b.aceUrl ? `<span>ACE <b class="mono">${esc(b.aceUrl)}</b></span>` : ""}
       ${b.resubmissionOf ? `<span>Resubmission of <a href="#/job/${encodeURIComponent(b.resubmissionOf)}">${esc(b.resubmissionOf)}</a></span>` : ""}</div>
-    ${statusCard(b, ex)}
+    ${verdictCard(b)}
+    ${statusCard(b, b.verdict && b.verdict.status === "passed" && ex.tone === "bad"
+      ? {...ex, tone: "info", headline: "As expected — " + ex.headline, next: ["Nothing to do: this failure is what the test expected."]} : ex)}
     <div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Where the job is</h3><span class="sub">eOCR steps and the stages ACE reports, with times and durations</span>
       <span class="right"><span class="tag eocr">eOCR</span><span class="tag ace">ACE</span></span></div><div class="track">${trackHtml(b.stageTrack || [])}</div></div>
     <div class="tabs">${TABS.map(([k, l]) => `<a href="#/job/${cid}/${k}" class="${k === tab ? "on" : ""}">${l}${counts[k] ? `<span class="n">${counts[k]}</span>` : ""}</a>`).join("")}</div>
     <div id="tab"></div>`;
-  ({overview: tabOverview, files: tabFiles, result: tabResult, validation: tabValidation, callbacks: tabCallbacks, spec: tabSpec, activity: tabActivity}[tab] || tabOverview)(b);
+  ({overview: tabOverview, files: tabFiles, result: tabResult, validation: tabValidation, callbacks: tabCallbacks, exchanges: tabExchanges, spec: tabSpec, activity: tabActivity}[tab] || tabOverview)(b);
   wireJob(b);
 }
 function trackHtml(steps) {
@@ -919,11 +1001,11 @@ function statusCard(b, ex) {
   if (OPEN(b) && b.callbackOverdue) actions.push(`<button class="btn primary" id="x-reconcile">Close from the Status API</button>`);
   if (b.state === "CLOSED" && tone !== "ok" && b.documents.length) actions.push(`<button class="btn primary" id="x-resubmit">${icon("copy")}Resubmit as new job</button>`);
   if (["DRAFT", "STAGED", "REJECTED"].includes(b.state)) actions.push(`<a class="btn primary" href="#/job/${encodeURIComponent(b.correlationId)}/setup">${b.state === "REJECTED" ? "Fix and submit again" : "Continue setup"}</a>`);
-  if ((b.state === "CLOSED" || b.state === "REJECTED") && tone !== "ok") actions.push(`<button class="btn" id="x-copy">${icon("copy")}Copy the failure summary</button>`);
+  if ((b.state === "CLOSED" || b.state === "REJECTED") && (tone !== "ok" || (b.verdict && b.verdict.status === "failed"))) actions.push(`<button class="btn" id="x-copy">${icon("copy")}Copy the failure summary</button>`);
   const body = (ex.items || []).length || (ex.next || []).length || actions.length || (ex.packageIssues || []).length || (ex.deviations || []).length;
   return `<section class="status-card ${tone}"><div class="sc-top"><div class="sc-icon">${icon(ic)}</div>
       <div class="sc-text"><div class="sc-title">${esc(ex.headline || statusOf(b).label)}</div>${ex.summary ? `<div class="sc-sub">${esc(ex.summary)}</div>` : ""}</div>
-      ${ex.stage ? `<div class="sc-where">${tone === "bad" ? "Failed at" : "Now at"}: ${esc(ex.stage)}</div>` : ""}</div>
+      ${ex.stage ? `<div class="sc-where">${tone === "bad" || ["CLOSED", "REJECTED"].includes(b.state) ? "Failed at" : "Now at"}: ${esc(ex.stage)}</div>` : ""}</div>
     ${body ? `<div class="sc-body">
       ${(ex.items || []).length ? `<div class="tbl"><table><tr><th>What</th><th>Problem</th><th>How to fix it</th></tr>${ex.items.map(i => `<tr><td class="mono">${esc(i.subject)}</td>
         <td style="color:var(--bad);font-weight:600">${esc(i.problem)}</td><td>${esc(i.fix || "")}</td></tr>`).join("")}</table></div>` : ""}
@@ -935,8 +1017,9 @@ function statusCard(b, ex) {
       ${actions.length ? `<div class="sc-actions">${actions.join("")}</div>` : ""}</div>` : ""}</section>`;
 }
 function failureText(b) {
-  const ex = b.explain || {};
+  const ex = b.explain || {}, v = b.verdict;
   return [`${ex.headline} — loan ${b.loanId}, job ${b.correlationId}, ACE job ${b.aceJobId || "-"}`, ex.summary, ex.stage ? `Stage: ${ex.stage}` : "",
+    ...(v ? [`Test "${v.title}": ${v.status}`, ...v.checks.filter(c => !c.ok).map(c => `- ${c.what}: expected ${c.expected}, got ${c.actual}`)] : []),
     ...(ex.items || []).map(i => `- ${i.subject}: ${i.problem}${i.fix ? ` (fix: ${i.fix})` : ""}`),
     ...(ex.deviations || []).flatMap(d => d.errors.map(e => `- spec ${d.clause}: ${e}`)),
     `Submitted ${b.submittedAt || "-"} by ${b.submittedBy || "-"}; closed ${b.closedAt || "-"}`].filter(Boolean).join("\n");
@@ -1061,6 +1144,28 @@ function tabCallbacks(b) {
         <td class="mono" style="font-size:12px">${esc(c.idempotencyKey || "—")}</td><td>${c.contractErrors.length ? pill(`${c.contractErrors.length} deviations`, "bad") : pill("ok", "ok")}</td></tr>
         <tr><td></td><td colspan="6"><details><summary>payload, headers and checks</summary><pre style="margin-top:8px">${esc(JSON.stringify({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers}, null, 2))}</pre></details></td></tr>`; }).join("")}</table></div>`
       : `<div class="empty">${b.aceJobId ? "ACE has not called back yet." : "The job has not been submitted."}</div>`}</div>`;
+}
+async function tabExchanges(b) {
+  $("#tab").innerHTML = `<div class="empty">Loading the exchange log…</div>`;
+  let ex; try { ex = await api("GET", `/api/batches/${encodeURIComponent(b.correlationId)}/exchanges`); } catch (e) { $("#tab").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const rows = [...ex.map(x => ({...x, dir: "out"})), ...(b.callbacks || []).map(c => ({dir: "in", at: c.receivedAt, method: "POST", url: "/eocr/callback (from ACE)",
+    status: c.answeredWith, requestHeaders: c.headers, requestBody: JSON.stringify(c.payload, null, 2), responseBody: c.answeredWith === 200 ? '{"received": true}' : '{"error": "simulated intermittent eOCR outage"}',
+    contractErrors: c.contractErrors, attempt: c.attempt}))].sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
+  const pretty = t => { if (!t) return ""; try { return JSON.stringify(JSON.parse(t), null, 2); } catch (e) { return t; } };
+  const tone = x => x.status === "error" ? "bad" : x.status >= 200 && x.status < 300 ? "ok" : x.status >= 500 ? "warn" : "bad";
+  $("#tab").innerHTML = `<div class="card"><div class="card-h"><h3>ACE exchanges</h3><span class="sub">every call the simulator made to ACE, and every callback ACE made back, in order.
+      Identical repeated status polls are folded into one line. Credentials are never shown.</span>
+      <a class="right btn sm" href="${BASE}/api/batches/${encodeURIComponent(b.correlationId)}/evidence.zip">${icon("download")}Evidence .zip</a></div>
+    ${rows.length ? `<div class="tbl"><table><tr><th>Time</th><th>Direction</th><th>Request</th><th>Status</th><th>Took</th></tr>
+      ${rows.map(x => `<tr><td>${when(x.at)}${x.repeats > 1 ? `<div class="hint">×${x.repeats} until ${when(x.lastAt)}</div>` : ""}</td>
+        <td>${x.dir === "out" ? `<span class="tag eocr">eOCR → ACE</span>` : `<span class="tag ace">ACE → eOCR</span>`}</td>
+        <td class="mono" style="font-size:12px"><b>${esc(x.method)}</b> ${esc(x.url.replace(/^https?:\/\/[^/]+/, ""))}${x.error ? `<div style="color:var(--bad)">${esc(x.error)}</div>` : ""}
+          ${(x.contractErrors || []).length ? `<div style="color:var(--bad)">${x.contractErrors.length} spec deviation(s)</div>` : ""}
+          <details><summary>request and response</summary><div class="grid2" style="margin-top:8px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))">
+            <div><div class="hint" style="font-weight:600">Request</div><pre>${esc(Object.entries(x.requestHeaders || {}).map(([k, v]) => `${k}: ${v}`).join("\n"))}${x.requestBody ? "\n\n" + esc(pretty(x.requestBody)) : ""}</pre></div>
+            <div><div class="hint" style="font-weight:600">Response ${esc(x.status ?? "")}</div><pre>${esc(Object.entries(x.responseHeaders || {}).map(([k, v]) => `${k}: ${v}`).join("\n"))}${x.responseBody ? "\n\n" + esc(pretty(x.responseBody)) : ""}</pre></div></div></details></td>
+        <td>${pill(x.status ?? "—", tone(x))}</td><td>${x.ms != null ? `${x.ms} ms` : ""}</td></tr>`).join("")}</table></div>`
+      : `<div class="empty">No exchanges with ACE yet.</div>`}</div>`;
 }
 function tabSpec(b) {
   const rows = b.specChecklist || [];

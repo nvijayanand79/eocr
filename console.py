@@ -223,6 +223,109 @@ def add_test_document(cid, kind, pages=None):
     return put_document(cid, name, "application/pdf", io.BytesIO(data), len(data), origin=f"test-data:{kind}")
 
 
+# ------------------------------------------------------------------ test presets: a scenario, its package and what should happen
+
+PRESETS = [
+    {"key": "happy", "title": "Happy path", "group": "positive",
+     "what": "A clean package that contains the NOTE. ACE should complete, validate the NOTE and extract fields.",
+     "docs": [["package", 40]], "expect": {"code": 0, "validationStatus": "PASSED"}},
+    {"key": "classify-only", "title": "Classification only", "group": "positive", "extraction": False,
+     "what": "extractionRequired \"false\": ACE classifies the documents and validates the NOTE, without extracting fields.",
+     "docs": [["package", 30]], "expect": {"code": 0}},
+    {"key": "multi-file", "title": "Package in several files", "group": "positive",
+     "what": "The loan package split over two PDFs. ACE should classify documents in both files.",
+     "docs": [["package", 20], ["package", 45]], "expect": {"code": 0, "validationStatus": "PASSED"}},
+    {"key": "callback-outage", "title": "eOCR endpoint down for 2 callbacks", "group": "resilience", "flaky": 2,
+     "what": "The eOCR callback endpoint answers 503 to ACE's first two callbacks. ACE should retry and deliver on attempt 3.",
+     "docs": [["package", 30]], "expect": {"code": 0, "minCallbackAttempts": 3}},
+    {"key": "password", "title": "Password-protected file", "group": "negative",
+     "what": "One file needs a password. ACE should stop at pre-check and name it (spec 6.2).",
+     "docs": [["package", 20], ["locked"]], "expect": {"code": 1000, "failedDocuments": [{"documentName": "locked.pdf", "reason": "Password Protected"}]}},
+    {"key": "corrupt", "title": "Corrupt file", "group": "negative",
+     "what": "One file is not a readable PDF. ACE should stop at pre-check and name it.",
+     "docs": [["package", 20], ["corrupt"]], "expect": {"code": 1000, "failedDocuments": [{"documentName": "broken.pdf", "reason": "Corrupted"}]}},
+    {"key": "missing-doc", "title": "Document missing from the folder", "group": "negative", "control": "ghost",
+     "what": "The control file lists ghost.pdf, which was never uploaded. ACE should stop at pre-check and name it.",
+     "docs": [["package", 20]], "expect": {"code": 1000, "failedDocuments": [{"documentName": "ghost.pdf"}]}},
+    {"key": "loanid-mismatch", "title": "Control file for another loan", "group": "negative", "control": "loanid",
+     "what": "The control file's loanId differs from the folder and the request. ACE should reject the control file at pre-check.",
+     "docs": [["package", 20]], "expect": {"code": 1000, "failedDocuments": [{"documentName": "{controlFileName}", "reason": "Loan ID Mismatch"}]}},
+    {"key": "note-mismatch", "title": "Loan data differs from the NOTE", "group": "negative",
+     "loanInfo": {"loanAmount": "1.00", "sellerLoanNumber": "0000000000"}, "autoHitl": ["loanAmount", "sellerLoanNumber"],
+     "what": "Wrong loan amount and seller loan number. ACE should pause for HITL review; the simulator confirms the mismatches and ACE ends in VALIDATION_FAILED.",
+     "docs": [["package", 30]], "expect": {"code": 2000, "validationStatus": "FAILED", "descriptionContains": ["Loan Amount", "Seller Loan Number"]}},
+]
+PRESET = {p["key"]: p for p in PRESETS}
+
+
+def apply_preset(cid, key):
+    """Stage the preset's package on a new job and record what the test expects."""
+    p = PRESET.get(key)
+    if not p:
+        raise ValueError(f"unknown test preset {key}")
+    for kind, *pages in p["docs"]:
+        add_test_document(cid, kind, pages[0] if pages else None)
+    batch = get(cid)
+    control = None
+    if p.get("control") == "ghost":
+        control = sim.build_control_file(batch)
+        control["documents"].append({"fileName": "ghost.pdf", "contentType": "application/pdf"})
+    elif p.get("control") == "loanid":
+        control = sim.build_control_file(batch)
+        control["loanInfo"]["loanId"] = f"{batch['loanId']}-OTHER"
+    expect = json.loads(json.dumps(p["expect"]).replace("{controlFileName}", batch["controlFileName"]))
+
+    def change(b):
+        if control is not None:
+            b["controlOverride"] = control
+        b["expectation"] = {"preset": key, "title": p["title"], "specClean": True, **expect}
+        b["plan"] = {"flaky": p.get("flaky", 0), "autoHitl": p.get("autoHitl") or []}
+        add_event(b, "test", f"test preset “{p['title']}”: {p['what']}")
+    return update_batch(cid, change)
+
+
+def set_expectation(cid, body):
+    """Set or clear what the test expects, and the HITL answers the simulator should give by itself."""
+    exp = body.get("expectation")
+    if exp is not None:
+        if not isinstance(exp, dict):
+            raise ValueError("expectation must be an object")
+        code = exp.get("code")
+        if code not in (None, 0, 1000, 2000, 3000, "REJECTED"):
+            raise ValueError("expected outcome must be 0, 1000, 2000, 3000 or REJECTED")
+        exp = {"preset": exp.get("preset"), "title": str(exp.get("title") or "Custom test")[:120], "code": code,
+               "failedDocuments": [{"documentName": str(f.get("documentName") or "")[:200], "reason": str(f.get("reason") or "")[:200]}
+                                   for f in exp.get("failedDocuments") or [] if isinstance(f, dict) and f.get("documentName")],
+               "validationStatus": exp.get("validationStatus") if exp.get("validationStatus") in ("PASSED", "FAILED", "NA") else None,
+               "descriptionContains": [str(t)[:120] for t in exp.get("descriptionContains") or [] if str(t).strip()],
+               "minCallbackAttempts": int(exp["minCallbackAttempts"]) if str(exp.get("minCallbackAttempts") or "").isdigit() else None,
+               "specClean": bool(exp.get("specClean", True))}
+        exp = {k: v for k, v in exp.items() if v not in (None, [], "")} | {"specClean": exp["specClean"]}
+    auto = [str(x) for x in body.get("autoHitl") or []] if "autoHitl" in body else None
+
+    def change(b):
+        if b["state"] == "CLOSED":
+            raise Conflict("the job is closed; its verdict is final")
+        b["expectation"] = exp
+        if auto is not None:
+            b["plan"] = {**(b.get("plan") or {}), "autoHitl": auto}
+        add_event(b, "test", "expected outcome " + ("cleared" if exp is None else f"set: {exp.get('title')}"))
+    return update_batch(cid, change)
+
+
+def auto_hitl(batch):
+    """The simulator answers ACE's HITL review itself when the test says which fields are wrong."""
+    wanted = (batch.get("plan") or {}).get("autoHitl")
+    wf = ((batch.get("status") or {}).get("workflow") or {})
+    if not wanted or wf.get("state") != "HITL_PENDING" or ((batch.get("hitl") or {}).get("decision")):
+        return
+    r = hitl_review(batch["correlationId"])
+    fields = ((r.get("review") or {}).get("fieldDetails")) or []
+    if fields:
+        hitl_decide(batch["correlationId"], [{"fieldName": f.get("fieldName"), "metadataValue": f.get("metadataValue"),
+                                              "extractedValue": f.get("extractedValue"), "isMatched": f.get("fieldName") not in wanted} for f in fields])
+
+
 def test_loan():
     try:
         loan = json.loads(sim.testdata("loan.json"))
@@ -280,7 +383,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
     batch_path = batch["folder"] if batch_path_mode == "folder" else batch["folder"] + batch["controlFileName"]
     request = {"loanId": batch["loanId"], "correlationId": batch["correlationId"], "batchPath": batch_path}
     meta = {}
-    code, resp = sim.call("POST", "/integration/loan/onboarding", request, base=ace_url, meta=meta)
+    code, resp = sim.call("POST", "/integration/loan/onboarding", request, base=ace_url, meta=meta, job=cid)
     job = resp.get("aceJobId") if isinstance(resp, dict) else None
     accepted = 200 <= code < 300 and bool(job)  # accepted even when the HTTP code is wrong: the job exists and must be tracked
     if accepted:
@@ -313,6 +416,9 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
         if not accepted:
             b.update(state="REJECTED", submittedAt=now_iso(), submittedBy=sim.operator())
             add_event(b, "rejected", f"onboarding at {ace_url} -> HTTP {code}", request=request, response=resp)
+            sim._judge(b)
+        else:
+            b.pop("verdict", None)  # an earlier refusal's verdict no longer applies
     update_batch(cid, change)
     sim.store_submission(cid, request, code, resp)
     return get(cid)
@@ -320,7 +426,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
 
 def hitl_review(cid):
     batch = get(cid)
-    code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]}, base=batch.get("aceUrl"))
+    code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]}, base=batch.get("aceUrl"), job=cid)
     if code == 200 and isinstance(body, dict) and isinstance(body.get("fieldDetails"), list):
         def keep(b):  # the review is what the NOTE said; keep it for the validation view after the job ends
             b["hitl"] = {**(b.get("hitl") or {}), "loadedAt": now_iso(), "loadedBy": sim.operator(), "fields": body["fieldDetails"],
@@ -333,7 +439,7 @@ def hitl_review(cid):
 def hitl_decide(cid, fields):
     """Acts as the ACE HITL reviewer (not an eOCR step) so a VALIDATION_FAILED or HITL path can be closed from here."""
     batch = get(cid)
-    code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields}, base=batch.get("aceUrl"))
+    code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields}, base=batch.get("aceUrl"), job=cid)
     rejected = [f["fieldName"] for f in fields if not f.get("isMatched")]
 
     def keep(b):
@@ -352,7 +458,7 @@ def close(cid, note=""):
     body = None
     if batch.get("aceJobId"):
         meta = {}
-        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta)
+        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta, job=cid)
         body = body if code == 200 and isinstance(body, dict) else None
     st = (body or {}).get("status") or {}
     terminal = st.get("code") in sim.TERMINAL
@@ -375,6 +481,7 @@ def close(cid, note=""):
                             "batchPath": "", "failedDocuments": []}
         if terminal:
             sim._validate(b)
+        sim._judge(b)
         add_event(b, "closed", f"execution closed by {by}" + (f" from Status API {st.get('code')} {st.get('value')} (no callback received)" if terminal and not b.get("callback") else "")
                   + (f": {note}" if note else ""))
     update_batch(cid, change)
@@ -409,6 +516,8 @@ def detail(cid):
         batch["validation"] = sim.validation_view(batch)  # live view while open; frozen at close
     batch["specChecklist"] = sim.spec_checklist(batch)
     batch["stageTrack"] = sim.stage_track(batch)
+    if batch["state"] != "CLOSED" or not batch.get("verdict"):
+        batch["verdict"] = sim.evaluate_expectation(batch)
     batch["explain"] = sim.explain(batch)
     batch["s3"] = {"intake": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "output": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None}
     return batch
@@ -477,6 +586,67 @@ def fetch_object(cid, area, name, inline=False):
     return Download(body, ctype if safe_inline or not inline else "application/octet-stream", name.rsplit("/", 1)[-1], inline and safe_inline)
 
 
+def evidence(cid, with_documents=False):
+    """Everything about one job in a zip, to attach to a ticket or hand to the ACE team."""
+    import io
+    import zipfile
+    b = detail(cid)
+    ex, v = b.get("explain") or {}, b.get("verdict")
+    buf = io.BytesIO()
+    z = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
+    put = lambda name, doc: z.writestr(name, doc if isinstance(doc, (bytes, str)) else json.dumps(doc, indent=2, default=str))  # noqa: E731
+    lines = [f"eOCR simulator evidence for job {cid}", "=" * 60,
+             f"Loan: {b['loanId']}", f"ACE job: {b.get('aceJobId') or '-'}", f"ACE endpoint: {b.get('aceUrl') or '-'}",
+             f"State: {b['state']}" + (f" — outcome {b['outcome'].get('code')} {b['outcome'].get('value')}: {b['outcome'].get('description')}" if b.get("outcome") else ""),
+             f"Created {b.get('createdAt')} by {b.get('createdBy') or '-'}; submitted {b.get('submittedAt') or '-'} by {b.get('submittedBy') or '-'}; "
+             f"closed {b.get('closedAt') or '-'} ({b.get('closedBy') or '-'})", "",
+             f"Summary: {ex.get('headline', '')}", ex.get("summary", "")]
+    if ex.get("stage"):
+        lines.append(f"Stage: {ex['stage']}")
+    lines += [f"- {i.get('subject')}: {i.get('problem')} (fix: {i.get('fix')})" for i in ex.get("items") or []]
+    if v:
+        lines += ["", f"Test “{v.get('title')}”: {v['status'].upper()}"] + [
+            f"- {'OK ' if c['ok'] else 'NO '} {c['what']}: expected {c['expected']}, got {c['actual']}" for c in v["checks"]]
+    lines += ["", "Stages:"] + [f"- [{st['side']}] {st['label']}: {st['status']} {st.get('at') or ''} {st.get('note') or ''}".rstrip()
+                                 for st in b.get("stageTrack") or []]
+    failed = [r for r in b.get("specChecklist") or [] if r["result"] == "failed"]
+    lines += ["", f"Spec deviations: {sum(len(r['errors']) for r in failed)}"] + [f"- {r['clause']}: {e}" for r in failed for e in r["errors"]]
+    lines += ["", "Files in this bundle: see the names; times are UTC; credentials are never included."]
+    put("SUMMARY.txt", "\n".join(lines) + "\n")
+    record = {k: v_ for k, v_ in b.items() if k not in ("callbacks", "records", "s3")}
+    put("job.json", record)
+    put("spec-checklist.json", b.get("specChecklist"))
+    put("validation.json", b.get("validation"))
+    put("explanation.json", ex)
+    if v:
+        put("verdict.json", v)
+    put("ace-exchanges.json", sim.exchanges(cid))
+    for c in b.get("callbacks") or []:
+        put(f"callbacks/{c.get('attempt', 0):03d}.json", c)
+    for r in sim.list_records(cid):
+        try:
+            put(f"records/{r['name']}", sim.read_record(cid, r["name"]))
+        except KeyError:
+            pass
+    f = folders(cid)
+    put("s3-listing.json", f)
+    try:
+        put(f"input/{b['controlFileName']}", s3.get_object(Bucket=INTAKE_BUCKET, Key=b["folder"] + b["controlFileName"])["Body"].read())
+    except Exception:
+        put(f"input/{b['controlFileName']}.NOT-IN-S3.txt", "The control file was not in the intake folder when the bundle was made.")
+    if with_documents:
+        total = 0
+        for o in f["input"]["objects"]:
+            if o["name"] != b["controlFileName"] and total + o["bytes"] <= MAX_DOWNLOAD:
+                total += o["bytes"]
+                put(f"input/{o['name']}", s3.get_object(Bucket=INTAKE_BUCKET, Key=o["key"])["Body"].read())
+    for o in f["output"]["objects"]:
+        if o["bytes"] <= MAX_DOWNLOAD:
+            put(f"output/{o['name']}", s3.get_object(Bucket=OUTPUT_BUCKET, Key=o["key"])["Body"].read())
+    z.close()
+    return Download(buf.getvalue(), "application/zip", f"eocr-evidence-{cid}.zip")
+
+
 def reports():
     objs = store.get().list(f"{SIM_PREFIX}reports/")
     out = []
@@ -496,7 +666,9 @@ def tracker():
             for key in keys:
                 cid = key[len(sim.ACTIVE_PREFIX):]
                 try:
-                    sim.refresh_status(cid)
+                    batch = sim.refresh_status(cid)
+                    if batch:
+                        auto_hitl(batch)
                 except KeyError:
                     store.get().delete(key)
                 except Exception as exc:
@@ -594,6 +766,8 @@ def _list(h, q):
     state, me = q.get("state", ""), sim.operator()
     if q.get("mine") and me:
         rows = [r for r in rows if me in (r.get("createdBy"), r.get("submittedBy"))]
+    if q.get("test"):
+        rows = [r for r in rows if r.get("verdict")]
     result = q.get("result", "")
     if result == "ok":
         rows = [r for r in rows if r["state"] == "CLOSED" and (r.get("outcome") or {}).get("code") == 0]
@@ -630,8 +804,24 @@ def _callbacks(h, q):
 @route("POST", r"/api/batches")
 def _create(h, q):
     b = h.json()
-    return sim.create_batch(str(b.get("loanId") or "").strip(), (b.get("correlationId") or "").strip() or None, b.get("loanInfo") or {},
-                            b.get("extractionRequired", True), (b.get("controlFileName") or "controlfile.json").strip())
+    preset = PRESET.get(b.get("preset") or "")
+    if b.get("preset") and not preset:
+        raise ValueError(f"unknown test preset {b.get('preset')}")
+    loan_info = {**(b.get("loanInfo") or {}), **((preset or {}).get("loanInfo") or {})}
+    extraction = preset["extraction"] if preset and "extraction" in preset else b.get("extractionRequired", True)
+    batch = sim.create_batch(str(b.get("loanId") or "").strip(), (b.get("correlationId") or "").strip() or None, loan_info,
+                             extraction, (b.get("controlFileName") or "controlfile.json").strip())
+    return apply_preset(batch["correlationId"], preset["key"]) if preset else batch
+
+
+@route("GET", r"/api/presets")
+def _presets(h, q):
+    return [{k: p.get(k) for k in ("key", "title", "group", "what", "expect", "flaky", "autoHitl", "loanInfo", "extraction", "docs")} for p in PRESETS]
+
+
+@route("PUT", CID + r"/expectation")
+def _expectation(h, q, cid):
+    return set_expectation(cid, h.json())
 
 
 @route("GET", CID)
@@ -786,6 +976,17 @@ def _folders(h, q, cid):
 @route("GET", CID + r"/object")
 def _object(h, q, cid):
     return fetch_object(cid, q.get("area", ""), q.get("name", ""), q.get("inline") == "1")
+
+
+@route("GET", CID + r"/exchanges")
+def _exchanges(h, q, cid):
+    get(cid)
+    return sim.exchanges(cid)
+
+
+@route("GET", CID + r"/evidence\.zip")
+def _evidence(h, q, cid):
+    return evidence(cid, q.get("documents") == "1")
 
 
 @route("GET", r"/api/reports")

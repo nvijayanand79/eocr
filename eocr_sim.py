@@ -394,6 +394,59 @@ def spec_checklist(batch):
     return rows
 
 
+# ------------------------------------------------------------------ expected outcome of a test, and its verdict
+
+EOCR_SIDE = ("3.1", "3.2")  # checklist rows about the package eOCR staged (not ACE's behaviour)
+
+
+def evaluate_expectation(batch):
+    """What the tester said should happen against what did. None when no expectation was set."""
+    exp = batch.get("expectation")
+    if not exp:
+        return None
+    state, o = batch["state"], batch.get("outcome") or {}
+    done = state in ("CLOSED", "REJECTED")
+    checks = []
+
+    def add(what, expected, actual, ok):
+        checks.append({"what": what, "expected": expected, "actual": actual if done else None, "ok": bool(done and ok)})
+
+    code = exp.get("code")
+    if code is not None:
+        actual = "refused by ACE" if state == "REJECTED" else f"{o.get('code')} {o.get('value')}" if o else None
+        add("Outcome", "refused by ACE" if code == "REJECTED" else f"{code} {STATUS.get(code, '')}".strip(), actual,
+            (state == "REJECTED") if code == "REJECTED" else (state == "CLOSED" and o.get("code") == code))
+    got = {d.get("documentName"): str(d.get("reason") or "") for d in o.get("failedDocuments") or [] if isinstance(d, dict)}
+    for f in exp.get("failedDocuments") or []:
+        name, reason = f.get("documentName"), str(f.get("reason") or "")
+        add(f"Failed document {name}", reason or "listed as failed", got.get(name, "not listed"),
+            name in got and reason.lower() in got[name].lower())
+    if exp.get("validationStatus"):
+        vs = (batch.get("validation") or {}).get("validationStatus")
+        add("NOTE validation", exp["validationStatus"], vs or "not reported", vs == exp["validationStatus"])
+    for term in exp.get("descriptionContains") or []:
+        add("ACE's description mentions", term, o.get("description") or "(empty)", term.lower() in str(o.get("description") or "").lower())
+    if exp.get("minCallbackAttempts"):
+        att = (batch.get("callback") or {}).get("attempt")
+        add("Callback delivered after eOCR refused it", f"attempt {exp['minCallbackAttempts']} or later", f"attempt {att}" if att else "no callback",
+            bool(att) and att >= int(exp["minCallbackAttempts"]))
+    if exp.get("specClean", True):
+        devs = sum(len(r["errors"]) for r in spec_checklist(batch) if r["result"] == "failed" and r["clause"] not in EOCR_SIDE)
+        devs += len((batch.get("validation") or {}).get("findings") or [])
+        add("ACE followed the spec", "no deviations or validation findings", f"{devs} found" if devs else "none", devs == 0)
+    status = "pending" if not done else "passed" if checks and all(c["ok"] for c in checks) else "failed"
+    return {"status": status, "title": exp.get("title"), "preset": exp.get("preset"), "checks": checks}
+
+
+def _judge(b):
+    """Freeze the verdict when the job ends."""
+    v = evaluate_expectation(b)
+    if v:
+        b["verdict"] = v
+        add_event(b, "verdict", f"test {v['status'].upper()}: " + ("outcome as expected" if v["status"] == "passed"
+                  else "; ".join(f"{c['what']}: expected {c['expected']}, got {c['actual']}" for c in v["checks"] if not c["ok"])))
+
+
 # ------------------------------------------------------------------ where the job is, and what went wrong (for people)
 
 ACE_STAGE_ORDER = ["COLLATION", "PRECHECK", "CLASSIFICATION", "EXTRACTION", "VALIDATION", "COMPLETED"]
@@ -701,6 +754,8 @@ def _summary(b):
            "contractErrors": len(set(b.get("contractErrors") or []) | set((b.get("callback") or {}).get("contractErrors") or [])
                                  | set((b.get("result") or {}).get("errors") or [])),
            "validationFindings": len((b.get("validation") or {}).get("findings") or []),
+           "verdict": (b.get("verdict") or {}).get("status") or ("pending" if b.get("expectation") and b["state"] not in ("CLOSED", "REJECTED") else None),
+           "testTitle": (b.get("expectation") or {}).get("title"),
            "validationStatus": (b.get("validation") or {}).get("validationStatus"),
            "lastEvent": ((b.get("events") or [None])[-1] or {}).get("message")}
 
@@ -745,7 +800,7 @@ def needs_attention(summary):
     except (AttributeError, ValueError):
         stale = False
     return bool((open_ and (summary.get("callbackOverdue") or (summary.get("workflow") or {}).get("state") == "HITL_PENDING")) or stale
-                or summary["state"] == "REJECTED" or summary.get("contractErrors") or summary.get("validationFindings"))
+                or summary["state"] == "REJECTED" or summary.get("contractErrors") or summary.get("validationFindings") or summary.get("verdict") == "failed")
 
 
 def list_callbacks(limit=500):
@@ -949,7 +1004,7 @@ def store_outcome(cid):
               "closedAt": batch["closedAt"], "closedBy": batch["closedBy"], "closedByUser": batch.get("closedByUser"), "outcome": batch["outcome"],
               "callbackAccepted": batch.get("callback"), "callbackAttempts": callback_records(batch["aceJobId"]) if batch.get("aceJobId") else [],
               "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
-              "validation": batch.get("validation"), "hitl": batch.get("hitl"),
+              "validation": batch.get("validation"), "hitl": batch.get("hitl"), "expectation": batch.get("expectation"), "verdict": batch.get("verdict"),
               "specChecklist": spec_checklist(batch),
               "responseFileCopy": f"{STORE_LABEL}{copy}" if copy else None,
               "contractErrors": sorted(set(batch.get("contractErrors") or []) | set((batch.get("callback") or {}).get("contractErrors") or [])
@@ -1020,7 +1075,7 @@ def refresh_status(cid, source="tracker"):
     if not batch.get("aceJobId"):
         raise Conflict("execution has no aceJobId yet")
     meta = {}
-    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta)
+    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta, job=cid)
     if code != 200 or not isinstance(body, dict):
         return update_batch(cid, lambda b: add_event(b, "error", f"Status API -> HTTP {code}", body=body))
     return update_batch(cid, lambda b: record_status(b, body, source, meta.get("contentType")))
@@ -1058,7 +1113,7 @@ def on_callback(job_id, record):
     meta = {}
     try:  # eOCR validates the callback against the Status API before closing
         meta = {}
-        code, body = call("GET", f"/integration/loan/status/{job_id}", base=batch.get("aceUrl"), meta=meta)
+        code, body = call("GET", f"/integration/loan/status/{job_id}", base=batch.get("aceUrl"), meta=meta, job=cid)
     except Exception as exc:
         code, body = None, f"{type(exc).__name__}: {exc}"
 
@@ -1081,6 +1136,7 @@ def on_callback(job_id, record):
                  outcome={"code": st.get("code"), "value": st.get("value"), "description": st.get("description"),
                           "batchPath": p.get("batchPath"), "failedDocuments": p.get("failedDocuments")})
         _validate(b)
+        _judge(b)
         add_event(b, "closed", f"execution closed on callback: {st.get('code')} {st.get('value')}")
 
     update_batch(cid, close)
@@ -1175,8 +1231,58 @@ def serve():
 
 # ------------------------------------------------------------------ ACE API client (SigV4 over VPC Lattice)
 
-def call(method, path, body=None, expect=None, base=None, meta=None):
-    """base: the ACE integration endpoint to call (default ACE_URL_INTEGRATION). meta, a dict, receives the response's contentType."""
+EXCHANGE_PREFIX = f"{SIM_PREFIX}exchanges/"
+EXCHANGE_KEEP = 400
+SECRET_HEADERS = {"authorization", "x-amz-security-token", "cookie", "set-cookie"}
+BODY_KEEP = 16384
+
+
+def _headers(h):
+    return {k: ("(redacted)" if k.lower() in SECRET_HEADERS else v) for k, v in dict(h or {}).items()}
+
+
+def _clip(text):
+    text = text if isinstance(text, str) else (text or b"").decode(errors="replace")
+    return text if len(text) <= BODY_KEEP else text[:BODY_KEEP] + f"… ({len(text) - BODY_KEEP} more characters)"
+
+
+def record_exchange(cid, entry):
+    """Append one ACE call to the job's exchange log. Identical repeats (a status poll that changed nothing) are
+    folded into the previous entry with a count, so hours of tracking stay readable."""
+    key = f"{EXCHANGE_PREFIX}{cid}.json"
+    for attempt in range(8):
+        try:
+            log_, etag = store.get_json(key)
+        except KeyError:
+            log_, etag = {"correlationId": cid, "exchanges": []}, None
+        items = log_["exchanges"]
+        last = items[-1] if items else None
+        norm = lambda e: (e["method"], e["url"], e["status"], re.sub(r'"timestamp":\s*"[^"]*"', "", e.get("responseBody") or ""))  # noqa: E731
+        if last and norm(last) == norm(entry):
+            last["repeats"] = last.get("repeats", 1) + 1
+            last["lastAt"] = entry["at"]
+        else:
+            items.append(entry)
+            del items[:-EXCHANGE_KEEP]
+        try:
+            store.put_json(key, log_, **({"if_match": etag} if etag else {"if_none_match": True}))
+            return
+        except Exception as exc:
+            if not _precondition_failed(exc):
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def exchanges(cid):
+    try:
+        return store.get_json(f"{EXCHANGE_PREFIX}{cid}.json")[0]["exchanges"]
+    except KeyError:
+        return []
+
+
+def call(method, path, body=None, expect=None, base=None, meta=None, job=None):
+    """base: the ACE integration endpoint to call (default ACE_URL_INTEGRATION). meta, a dict, receives the response's contentType.
+    job: the correlationId whose exchange log records this call (request, response, headers, timing)."""
     url = (base or INTEGRATION_URL).rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Accept": "application/json", "x-amz-content-sha256": "UNSIGNED-PAYLOAD"}
@@ -1185,11 +1291,26 @@ def call(method, path, body=None, expect=None, base=None, meta=None):
     req = AWSRequest(method=method, url=url, data=data, headers=headers)
     SigV4Auth(_session.get_credentials().get_frozen_credentials(), "vpc-lattice-svcs", REGION).add_auth(req)
     http = urllib.request.Request(url, data=data, method=method, headers=dict(req.headers.items()))
+    started, at = time.time(), now_iso()
+    code, text, ctype, rheaders, error = None, "", None, {}, None
     try:
         with urllib.request.urlopen(http, timeout=60) as r:
-            code, text, ctype = r.status, r.read().decode(), r.headers.get("Content-Type")
+            code, text, ctype, rheaders = r.status, r.read().decode(), r.headers.get("Content-Type"), dict(r.headers.items())
     except urllib.error.HTTPError as e:
-        code, text, ctype = e.code, e.read().decode(errors="replace"), e.headers.get("Content-Type")
+        code, text, ctype, rheaders = e.code, e.read().decode(errors="replace"), e.headers.get("Content-Type"), dict(e.headers.items())
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    finally:
+        if job:
+            try:
+                record_exchange(job, {"at": at, "method": method, "url": url, "status": code if error is None else "error", "error": error,
+                                      "ms": round((time.time() - started) * 1000), "requestHeaders": _headers(req.headers.items()),
+                                      "requestBody": _clip(data) if data else None, "responseHeaders": _headers(rheaders),
+                                      "responseBody": _clip(text) if text else None})
+            except Exception as exc:
+                log("exchange log failed", correlationId=job, error=f"{type(exc).__name__}: {exc}")
+    if error:
+        raise ConnectionError(f"{method} {url}: {error}")
     if meta is not None:
         meta["contentType"] = ctype
     try:
@@ -1337,7 +1458,7 @@ class Scenario:
 
     def onboard(self):
         body = {"loanId": self.loan_id, "correlationId": self.correlation_id, "batchPath": self.batch_path}
-        code, resp = call("POST", "/integration/loan/onboarding", body, expect=202)
+        code, resp = call("POST", "/integration/loan/onboarding", body, expect=202, job=self.correlation_id)
         if set(resp) != {"aceJobId", "status"} or resp["status"] != {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}:
             self.err(f"onboarding acknowledgement does not match spec 4.2: {resp}")
         self.job = resp["aceJobId"]
@@ -1362,7 +1483,7 @@ class Scenario:
         except Exception as exc:
             log("submission record failed", scenario=self.name, error=f"{type(exc).__name__}: {exc}")
         # idempotency: the same request again returns the same job
-        _, again = call("POST", "/integration/loan/onboarding", body, expect=202)
+        _, again = call("POST", "/integration/loan/onboarding", body, expect=202, job=self.correlation_id)
         if again.get("aceJobId") != self.job:
             self.err(f"repeated onboarding returned a different job {again.get('aceJobId')}")
         else:
@@ -1372,7 +1493,7 @@ class Scenario:
         deadline = time.time() + timeout_s
         last = None
         while time.time() < deadline:
-            _, body = call("GET", f"/integration/loan/status/{self.job}", expect=200)
+            _, body = call("GET", f"/integration/loan/status/{self.job}", expect=200, job=self.correlation_id)
             errs = check_status_response(body, self.job)
             for e in errs:
                 if e not in self.result["errors"]:
@@ -1394,11 +1515,11 @@ class Scenario:
 
     def hitl_review(self):
         """Acts as the ACE HITL reviewer (not eOCR): confirms the mismatches ACE found."""
-        _, review = call("POST", "/validate/reviewValidation", {"clientLoanNumber": self.loan_id, "adr": self.job}, expect=200)
+        _, review = call("POST", "/validate/reviewValidation", {"clientLoanNumber": self.loan_id, "adr": self.job}, expect=200, job=self.correlation_id)
         fields = [{"fieldName": f["fieldName"], "metadataValue": f.get("metadataValue"), "extractedValue": f.get("extractedValue"),
                    "isMatched": f["fieldName"] not in self.hitl_reject} for f in review["fieldDetails"]]
         self.ok(f"HITL review shown to reviewer: totalMatches={review['totalMatches']}, fields={[(f['fieldName'], f.get('isMatched')) for f in review['fieldDetails']]}")
-        code, resp = call("POST", "/validate/updateValidation", {"clientLoanNumber": self.loan_id, "adr": self.job, "updatedFields": fields})
+        code, resp = call("POST", "/validate/updateValidation", {"clientLoanNumber": self.loan_id, "adr": self.job, "updatedFields": fields}, job=self.correlation_id)
         self.ok(f"HITL reviewer confirmed mismatches {self.hitl_reject} -> HTTP {code}")
         self.trace(lambda b: b.update(hitl={"loadedAt": now_iso(), "loadedBy": operator(), "fields": review["fieldDetails"],
                                             "totalMatches": review.get("totalMatches"),

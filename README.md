@@ -63,6 +63,21 @@ step traced end to end.
     *Spec compliance*, *Activity*.
 - **Callbacks** and **Scenario runs**.
 
+**Tests.** New job starts with *What do you want to test?*: happy path, classification only, package in several files,
+eOCR endpoint down for 2 callbacks, password-protected file, corrupt file, document missing from the folder, control
+file for another loan, loan data differs from the NOTE (the simulator answers ACE's HITL review itself). A test stages
+its package and states the expected outcome (outcome code, failed documents and reasons, NOTE validation, words in
+ACE's description, callback attempt, "ACE must follow the spec"); all of it is editable in the Submit step, and a
+from-scratch job can have one too. When the job ends it shows **Test passed** or **Test failed** with each check, an
+expected failure reads "As expected", and Jobs / the dashboard count tests passed. The verdict is kept in `outcome.json`.
+
+**ACE exchanges and evidence.** Every call the simulator makes to ACE (onboarding, each status poll, HITL review,
+close) is logged per job with request and response headers and bodies, status and time taken (credentials redacted;
+identical repeated polls folded into one line); the *ACE exchanges* tab shows them with ACE's callbacks in order.
+**Evidence** downloads one zip per job: `SUMMARY.txt` (what happened, the verdict, the stages, the deviations),
+the control file ACE read, the job record, submission and outcome records, callbacks, the exchange log, ACE's output,
+the checklist, validation and an S3 listing (`?documents=1` adds the PDFs).
+
 "Resubmit as new job" copies the package into a new job and opens its wizard at *Documents*, so the failing files
 can be replaced first. Files are viewed inline only for PDF, images, JSON and text, and every file response is
 sandboxed, so nothing uploaded can run inside the console.
