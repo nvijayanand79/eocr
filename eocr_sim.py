@@ -1344,9 +1344,12 @@ def build_scenarios(loan, only):
     note_first, note_last = loan["notePages"]
     rnd = random.Random()
 
+    total = len(PdfReader(io.BytesIO(pkg)).pages)
+
     def around_note(min_pages, max_pages):
-        count = rnd.randint(min_pages, max_pages)
-        first = rnd.randint(max(1, note_last - count + 1), note_first)
+        count = min(rnd.randint(min_pages, max_pages), total)
+        # the slice holds the NOTE and stays inside the document
+        first = rnd.randint(max(1, note_last - count + 1), max(1, min(note_first, total - count + 1)))
         return first, count
 
     lid = loan["loanId"]
