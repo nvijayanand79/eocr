@@ -10,6 +10,8 @@ python lifecycle_check.py <scenario>
   validation  NOTE mismatch, reviewer confirms (T3)    -> review, NOTE review FAIL                 -> 2000
   notepass    NOTE mismatch, reviewer overrules        -> review, NOTE review PASS                 -> 0 (no extraction)
   precheck    locked + corrupt files (T1)              -> no review                                -> 1000
+  ignored     console preset "Ignored files": happy path + an unlisted file + an exact copy under a second name
+                                                       -> reviews as happy                         -> 0, ignoredDocuments NOT_LISTED + DUPLICATE
   resume      python lifecycle_check.py resume <correlationId> <ADR> <scenario>  (continue a waiting job)
 
 Environment: ACE_URL (default the QA URL), ACE_TEST_USER and ACE_TEST_PASSWORD (an ACE account used for the
@@ -86,11 +88,14 @@ else:
     info = dict(tl["loanInfo"])
     if scenario in ("validation", "notepass"):
         info.update(loanAmount="1.00", sellerLoanNumber="0000000000")
-    extraction = scenario == "happy"
-    st, b = api("POST", "/api/batches", {"loanId": tl["loanId"], "loanInfo": info, "extractionRequired": extraction})
+    extraction = scenario in ("happy", "ignored")
+    preset = {"ignored": "ignored-files"}.get(scenario)  # the console preset stages the package and the expectation
+    st, b = api("POST", "/api/batches", {"loanId": tl["loanId"], "loanInfo": info, "extractionRequired": extraction, "preset": preset})
     cid = b["correlationId"]
-    say("job created", st, cid, "extractionRequired", extraction)
-    if scenario == "precheck":
+    say("job created", st, cid, "extractionRequired", extraction, "preset", preset)
+    if preset:
+        say("documents from the preset:", [d["fileName"] for d in b.get("documents") or []])
+    elif scenario == "precheck":
         for kind in ("package", "locked", "corrupt"):
             say("document", kind, api("POST", f"/api/batches/{cid}/testdata", {"kind": kind, "pages": 30})[0])
     else:
@@ -141,6 +146,9 @@ say("reviews done:", reviews)
 say("callback attempts", (b.get("callback") or {}).get("attempt"), "| result ok", (b.get("result") or {}).get("ok"), "| errors", (b.get("result") or {}).get("errors"))
 v = b.get("validation") or {}
 say("validation", v.get("validationStatus"), "findings", v.get("findings"))
+say("files ACE did not process (ignoredDocuments):", o.get("ignoredDocuments"))
+if b.get("verdict"):
+    say("test", b["verdict"].get("status"), [(c.get("what"), c.get("expected"), c.get("actual")) for c in b["verdict"].get("checks") or [] if not c.get("ok")])
 chk = b.get("specChecklist") or []
 say("spec checklist", dict(collections.Counter(c.get("result") for c in chk)), [(c.get("clause"), c.get("errors")) for c in chk if c.get("result") == "failed"])
 print("CID", cid, "ADR", adr)

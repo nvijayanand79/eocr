@@ -203,6 +203,9 @@ def remove_document(cid, name):
     return batch
 
 
+UNLISTED_NAME = "not-in-control-file.pdf"
+
+
 def add_test_document(cid, kind, pages=None):
     """Sample documents built from the environment's test loan (s3://<config>/test-data/eocr/)."""
     import io
@@ -218,6 +221,17 @@ def add_test_document(cid, kind, pages=None):
         data, name = sim.password_protected_pdf(), "locked.pdf"
     elif kind == "corrupt":
         data, name = b"%PDF-1.4\n1 0 obj garbage\n", "broken.pdf"
+    elif kind == "copy":  # an exact byte copy of the job's first document, under a second name
+        docs = get(cid)["documents"]
+        if not docs:
+            raise ValueError("add a document first: the copy duplicates the job's first document")
+        src = docs[0]["fileName"]
+        data = s3.get_object(Bucket=INTAKE_BUCKET, Key=get(cid)["folder"] + src)["Body"].read()
+        name = f"{os.path.splitext(src)[0]}_copy{os.path.splitext(src)[1]}"
+        return put_document(cid, name, docs[0]["contentType"], io.BytesIO(data), len(data), origin=f"test-data:copy of {src}")
+    elif kind == "unlisted":  # a small extra PDF; the "Ignored files" preset leaves it out of the control file
+        loan = json.loads(sim.testdata("loan.json"))
+        data, name = sim.page_slice(sim.testdata(loan["file"]), 1, 1), UNLISTED_NAME
     else:
         raise ValueError(f"unknown test document kind {kind}")
     return put_document(cid, name, "application/pdf", io.BytesIO(data), len(data), origin=f"test-data:{kind}")
@@ -254,6 +268,13 @@ PRESETS = [
      "loanInfo": {"loanAmount": "1.00", "sellerLoanNumber": "0000000000"},
      "what": "Wrong loan amount and seller loan number. ACE should pause for its NOTE review; when the ACE reviewer confirms the mismatches, ACE ends in VALIDATION_FAILED.",
      "docs": [["package", 30]], "expect": {"code": 2000, "validationStatus": "FAILED", "descriptionContains": ["Loan Amount", "Seller Loan Number"]}},
+    {"key": "ignored-files", "title": "Ignored files", "group": "positive", "control": "unlisted",
+     "what": "The happy-path package plus a file in the folder that the control file does not list, and an exact copy of the package listed under a second name. "
+             "ACE should complete and report both under ignoredDocuments (NOT_LISTED, DUPLICATE).",
+     "docs": [["package", 40], ["copy"], ["unlisted"]],
+     "expect": {"code": 0, "validationStatus": "PASSED", "ignoredDocuments": [
+         {"documentName": "{unlistedName}", "reason": "NOT_LISTED"},
+         {"documentName": "{copyName}", "reason": "DUPLICATE", "duplicateOf": "{copyOf}"}]}},
 ]
 PRESET = {p["key"]: p for p in PRESETS}
 
@@ -273,7 +294,16 @@ def apply_preset(cid, key):
     elif p.get("control") == "loanid":
         control = sim.build_control_file(batch)
         control["loanInfo"]["loanId"] = f"{batch['loanId']}-OTHER"
-    expect = json.loads(json.dumps(p["expect"]).replace("{controlFileName}", batch["controlFileName"]))
+    elif p.get("control") == "unlisted":  # in the folder, not in the control file
+        control = sim.build_control_file(batch)
+        control["documents"] = [d for d in control["documents"] if d["fileName"] != UNLISTED_NAME]
+    copy = next((d for d in batch["documents"] if str(d.get("origin")).startswith("test-data:copy of ")), {})
+    names = {"{controlFileName}": batch["controlFileName"], "{unlistedName}": UNLISTED_NAME, "{copyName}": copy.get("fileName", ""),
+             "{copyOf}": str(copy.get("origin", ""))[len("test-data:copy of "):]}
+    text = json.dumps(p["expect"])
+    for k, v in names.items():
+        text = text.replace(k, v)
+    expect = json.loads(text)
 
     def change(b):
         if control is not None:
@@ -296,6 +326,8 @@ def set_expectation(cid, body):
         exp = {"preset": exp.get("preset"), "title": str(exp.get("title") or "Custom test")[:120], "code": code,
                "failedDocuments": [{"documentName": str(f.get("documentName") or "")[:200], "reason": str(f.get("reason") or "")[:200]}
                                    for f in exp.get("failedDocuments") or [] if isinstance(f, dict) and f.get("documentName")],
+               "ignoredDocuments": [{k: str(f.get(k))[:200] for k in ("documentName", "reason", "duplicateOf") if f.get(k)}
+                                    for f in exp.get("ignoredDocuments") or [] if isinstance(f, dict) and f.get("documentName")],
                "validationStatus": exp.get("validationStatus") if exp.get("validationStatus") in ("PASSED", "FAILED", "NA") else None,
                "descriptionContains": [str(t)[:120] for t in exp.get("descriptionContains") or [] if str(t).strip()],
                "minCallbackAttempts": int(exp["minCallbackAttempts"]) if str(exp.get("minCallbackAttempts") or "").isdigit() else None,
@@ -441,12 +473,13 @@ def close(cid, note=""):
         b.update(state="CLOSED", closedAt=now_iso(), closedBy=by, closedByUser=sim.operator())
         if terminal:
             b["result"] = result
-            b["outcome"] = {k: st.get(k) for k in ("code", "value", "description")} | {"batchPath": body.get("batchPath"), "failedDocuments": body.get("failedDocuments")}
+            b["outcome"] = {k: st.get(k) for k in ("code", "value", "description")} | {"batchPath": body.get("batchPath"), "failedDocuments": body.get("failedDocuments"),
+                                                                                    "ignoredDocuments": sim.ignored_documents(body)}
             if result["key"]:
                 add_event(b, "result", f"Response.json {'retrieved and matches spec 6.4/6.5' if result['ok'] else 'has contract errors'}: {result['key']}", errors=result["errors"])
         else:
             b["outcome"] = {"code": None, "value": "ABANDONED", "description": note or "closed by the operator before ACE finished",
-                            "batchPath": "", "failedDocuments": []}
+                            "batchPath": "", "failedDocuments": [], "ignoredDocuments": []}
         if terminal:
             sim._validate(b)
         sim._judge(b)
@@ -1135,6 +1168,7 @@ def _export_executions(h, q):
         ("correlationId", lambda r: r["correlationId"]), ("loanId", lambda r: r["loanId"]), ("aceJobId", lambda r: r["aceJobId"]),
         ("state", lambda r: r["state"]), ("outcomeCode", lambda r: o(r, "code")), ("outcome", lambda r: o(r, "value")),
         ("description", lambda r: o(r, "description")), ("failedDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" for f in o(r, "failedDocuments") or [])),
+        ("ignoredDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" + (f" of {f['duplicateOf']}" if f.get("duplicateOf") else "") for f in sim.ignored_documents(r.get("outcome")))),
         ("resultFile", lambda r: o(r, "batchPath")), ("aceStage", lambda r: (r.get("workflow") or {}).get("stage")), ("aceState", lambda r: (r.get("workflow") or {}).get("state")),
         ("createdAt", lambda r: r["createdAt"]), ("createdBy", lambda r: r.get("createdBy")), ("submittedAt", lambda r: r.get("submittedAt")),
         ("submittedBy", lambda r: r.get("submittedBy")), ("callbackAt", lambda r: r.get("callbackAt")), ("callbackAttempts", lambda r: r.get("callbackAttempts")),
@@ -1154,6 +1188,7 @@ def _export_callbacks(h, q):
         ("attempt", lambda r: r["attempt"]), ("answeredWith", lambda r: r["answeredWith"]), ("statusCode", lambda r: s_(r).get("code")),
         ("status", lambda r: s_(r).get("value")), ("description", lambda r: s_(r).get("description")), ("batchPath", lambda r: p(r).get("batchPath")),
         ("failedDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" for f in p(r).get("failedDocuments") or [] if isinstance(f, dict))),
+        ("ignoredDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" + (f" of {f['duplicateOf']}" if f.get("duplicateOf") else "") for f in sim.ignored_documents(p(r)))),
         ("idempotencyKey", lambda r: r.get("idempotencyKey")), ("callerPrincipal", lambda r: r.get("callerPrincipal")),
         ("contractErrors", lambda r: " | ".join(r.get("contractErrors") or [])),
     ], f"eocr-callbacks-{sim.now_iso()[:10]}.csv")

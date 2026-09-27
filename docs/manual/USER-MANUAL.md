@@ -224,6 +224,12 @@ comparison, ACE's verdict and the reviewer's decision.
 The **Callbacks** tab shows the callback ACE sent: status, time, attempt, Idempotency-Key and the specification
 checks.
 
+**Files ACE did not process.** ACE leaves out a file that is in the S3 folder but not in the control file
+(*NOT_LISTED*), and a file that is an exact copy of a file listed before it (*DUPLICATE*, with the name of the file it
+copies). The callback and the Status API name these files in `ignoredDocuments`; the Overview, Result and Callbacks
+tabs list them under **Files ACE did not process**, and show nothing when there are none. They are not failures: the
+job still completes. Older ACE versions do not send the list.
+
 ![Callbacks tab](img/62-job-closed-callbacks-tab.jpg)
 
 ---
@@ -236,11 +242,11 @@ with extraction (ADR-2026-200000000025).
 
 | Tab | Shows |
 |---|---|
-| **Overview** | what was sent (loan data, documents, control file) and what came back (outcome, documents classified, fields extracted, validation, spec checks) |
+| **Overview** | what was sent (loan data, documents, control file) and what came back (outcome, documents classified, fields extracted, validation, spec checks, and **Files ACE did not process** when there are any) |
 | **Files in S3** | the input folder (what ACE read), ACE's output folder and the simulator's own records, with size, time, view and download |
 | **Result** | the outcome and the result file (Response.json): every document ACE found with its type, pages and extracted fields |
 | **Validation** | NOTE validation per field and the document checks |
-| **Callbacks** | every callback delivery attempt for this job |
+| **Callbacks** | every callback delivery attempt for this job, with the files ACE did not process when the callback names any |
 | **ACE exchanges** | every call to ACE (onboarding, status polls) with request, response and time |
 | **Spec compliance** | the specification checklist: passed, failed (with the deviation), not applicable, pending |
 | **Activity** | ACE's status history and the job's timeline (who did what, when) |
@@ -304,6 +310,10 @@ field with both values. Correct the loan data (or the NOTE) and resubmit.
 | Document missing from the folder | the control file lists a file that was never uploaded | 1000, *ghost.pdf* |
 | Control file for another loan | the control file's loan ID differs | 1000, *Loan ID Mismatch* |
 | Loan data differs from the NOTE | wrong loan amount and seller loan number | 2000 after the reviewer confirms the mismatch |
+| Ignored files | the happy-path package, plus *not-in-control-file.pdf* in the folder but not in the control file, and an exact copy of the package listed under a second name (*…_copy.pdf*) | 0, NOTE PASSED, and both files under **Files ACE did not process**: *NOT_LISTED* and *DUPLICATE* of the package |
+
+In the Ignored files test the **Check S3 folder** step warns that a file is not in the control file. That is the point
+of the test: continue.
 
 Every test except the pre-check ones waits for reviews in ACE (section 5) before it can finish.
 

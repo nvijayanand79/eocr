@@ -65,8 +65,12 @@ step traced end to end.
 
 **Tests.** New job starts with *What do you want to test?*: happy path, classification only, package in several files,
 eOCR endpoint down for 2 callbacks, password-protected file, corrupt file, document missing from the folder, control
-file for another loan, loan data differs from the NOTE (ACE's reviewer decides the NOTE review in ACE). A test stages
-its package and states the expected outcome (outcome code, failed documents and reasons, NOTE validation, words in
+file for another loan, loan data differs from the NOTE (ACE's reviewer decides the NOTE review in ACE), ignored files
+(the happy-path package plus `not-in-control-file.pdf` in the folder but not in the control file, and
+`<package>_copy.pdf`, an exact byte copy of the package listed under a second name: ACE should complete and report both
+in `ignoredDocuments`, NOT_LISTED and DUPLICATE of the package; the spec 3.2 check flags the unlisted file on purpose,
+and it does not count against the test). A test stages
+its package and states the expected outcome (outcome code, failed documents and reasons, files ACE should not process, NOTE validation, words in
 ACE's description, callback attempt, "ACE must follow the spec"); all of it is editable in the Submit step, and a
 from-scratch job can have one too. When the job ends it shows **Test passed** or **Test failed** with each check, an
 expected failure reads "As expected", and Jobs / the dashboard count tests passed. The verdict is kept in `outcome.json`.
@@ -200,7 +204,8 @@ Each execution's Tracking tab has a **Validation** section:
 - **Findings**, counted like spec deviations (needs attention, "N issues" chip): ACE passed validation although a NOTE
   value differs from the control file; ACE reports a mismatch for a field whose values are equal; VALIDATION_FAILED
   without naming a field; `validationStatus` FAILED on another outcome; a document that passed pre-check but is not in
-  Response.json; `failedDocuments` naming a file that was never submitted.
+  Response.json (files the control file does not list, and files in `ignoredDocuments`, are exempt); `failedDocuments`
+  or `ignoredDocuments` naming a file that was never submitted; a DUPLICATE whose `duplicateOf` is not a listed document.
 
 The view is frozen on the execution and in `outcome.json` when it closes.
 
@@ -217,13 +222,14 @@ applicable / pending), and the same checklist is frozen into `outcome.json`.
 | 4, 4.1 Onboarding | `POST /integration/loan/onboarding` with loanId, correlationId, batchPath (control file or folder); malformed requests in `api-contract` |
 | 4.2 Acknowledgement | HTTP 202, `application/json`, exactly `{aceJobId, status {202, ACCEPTED, "Request accepted for processing."}}`; a 2xx other than 202 with an aceJobId is still tracked and reported |
 | 5 Callback endpoint | `POST /eocr/callback`, `application/json`, aceJobId of a job eOCR submitted (unknown jobs are shown), terminal values only |
-| 5.1, 5.2 Callback payload | exactly the five flat fields, numeric code matching value, non-empty description, ISO 8601 UTC timestamp (fractions and `+00:00` allowed), failedDocuments items `{documentName, reason}` |
+| 5.1, 5.2 Callback payload | exactly the five flat fields (plus the optional `ignoredDocuments`, below), numeric code matching value, non-empty description, ISO 8601 UTC timestamp (fractions and `+00:00` allowed), failedDocuments items `{documentName, reason}` |
+| `ignoredDocuments` (ACE addition, callback and Status API, after failedDocuments) | files ACE did not process: `[{documentName, reason: NOT_LISTED}, {documentName, reason: DUPLICATE, duplicateOf}]`, `duplicateOf` only on a DUPLICATE; always sent (possibly empty) by current ACE, absent from older builds, which counts as empty. Stored with the callback and the outcome, shown on the job page (Overview, Result, Callbacks) as "Files ACE did not process", in both CSV exports |
 | 6.1-6.3 Per-status payloads, status mapping | batchPath `<aceJobId>/<name>Response.json` for 0 and 2000, empty otherwise; failedDocuments populated only for 1000 |
 | 6.4 *Response.json | one per batch, top-level fields and order, `extractionRequired` as sent, `validationStatus` PASSED/FAILED/NA and as the outcome implies, Documents items and their field order, fileName of a submitted document, pageRange syntax, confidencePercentage keyed by pages inside pageRange with 0-100 values, extraction `{Value, cr}`, fileSize a byte count |
 | 6.5 VALIDATION_FAILED | same schema, validationStatus FAILED, extraction empty; plus the NOTE validation view (control file vs NOTE vs ACE vs HITL) |
 | 7.1-7.4 Status API | `GET /integration/loan/status/{aceJobId}` with `Accept: application/json`; response `application/json`, exact fields, workflow stage/state, code/value, output rules, timestamp; 4040 with `workflow {}` for unknown jobs |
 | 7 Status progression | never back from a terminal status, never a different terminal outcome, never 4040 for an accepted job |
-| 5 vs 7 | callback status, batchPath and failedDocuments equal the Status API's |
+| 5 vs 7 | callback status, batchPath, failedDocuments and ignoredDocuments equal the Status API's |
 | Consistency rule | status.code and status.value must match, everywhere |
 
 Not checked, because the spec does not define it: the aceJobId format, authentication (IAM here), onboarding error

@@ -599,6 +599,11 @@ async function drawJobs() {
 const WZ = [["Loan details", "goes into the control file"], ["Documents", "uploaded to the S3 folder"], ["Control file", "generated, editable"], ["Check S3 folder", "what ACE will read"], ["Submit", "call ACE"]];
 let wz = null, presets = null;
 const GROUP = {positive: "Should succeed", negative: "Should fail", resilience: "Resilience"};
+// ignoredDocuments (callback / Status API): files ACE did not process. Older ACE builds do not send it: missing = none.
+const ignoredOf = o => Array.isArray((o || {}).ignoredDocuments) ? o.ignoredDocuments.filter(f => f && typeof f === "object") : [];
+const IGNORED_REASON = {NOT_LISTED: "in the folder, not in the control file", DUPLICATE: "exact copy"};
+const ignoredHtml = list => list.map(f => `<div><span class="mono">${esc(f.documentName)}</span>: <b style="color:var(--warn)">${esc(f.reason)}</b>
+  <span class="hint">${esc(IGNORED_REASON[f.reason] || "")}${f.duplicateOf ? ` of <span class="mono">${esc(f.duplicateOf)}</span>` : ""}</span></div>`).join("");
 const EXPECT_LABEL = {0: "0 Completed", 1000: "1000 Pre-check failed", 2000: "2000 Validation failed", 3000: "3000 Processing failed", REJECTED: "Refused by ACE"};
 async function pageWizard(cid) {
   wz = {cid, batch: null, step: 0, uploads: {}, extraLoan: null, cf: null, cfMode: "form", preset: null, exp: undefined};
@@ -675,7 +680,8 @@ async function wzLoan() {
         <label class="field"><span>Control file name</span><input id="w-cf" value="${esc(b ? b.controlFileName : "controlfile.json")}" ${b ? "disabled" : ""}></label></div></details>
     </div>
     <div style="margin-top:18px"><button class="btn sm" id="w-fill">${icon("file")}Fill from the environment's test loan</button></div>
-    ${picked ? `<p class="hint" style="margin-top:14px">${icon("info")} This test stages ${esc(picked.docs.map(d => d[0] === "package" ? `a ${d[1]}-page package slice` : d[0] === "locked" ? "locked.pdf" : "broken.pdf").join(" and "))}${picked.flaky ? `, refuses the first ${picked.flaky} callbacks` : ""}. You can change any of it in the next steps.</p>` : ""}`;
+    ${picked ? `<p class="hint" style="margin-top:14px">${icon("info")} This test stages ${esc(picked.docs.map(d => d[0] === "package" ? `a ${d[1]}-page package slice` : d[0] === "locked" ? "locked.pdf" : d[0] === "copy" ? "an exact copy of it under a second name"
+      : d[0] === "unlisted" ? "a file the control file does not list" : "broken.pdf").join(" and "))}${picked.flaky ? `, refuses the first ${picked.flaky} callbacks` : ""}. You can change any of it in the next steps.</p>` : ""}`;
   const fillTest = async () => { const t = await api("GET", "/api/testloan"); if (t.error) throw new Error("No test loan: " + t.error);
     if (!wz.batch) $("#w-loan").value = t.loanId; const l = {...(t.loanInfo || {}), ...((picked || {}).loanInfo || {})}; wz.extraLoan = t.loanInfo || {};
     $("#w-seller").value = l.sellerLoanNumber || ""; $("#w-amount").value = l.loanAmount || ""; $("#w-borrower").value = l.borrowerLastName || ""; return t; };
@@ -702,6 +708,7 @@ async function wzLoan() {
 function wzDocs() {
   const b = wz.batch, base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
   const rows = [...b.documents.map(d => ({...d, state: "done"})), ...Object.values(wz.uploads).filter(u => !b.documents.some(d => d.fileName === u.name))];
+  const unlisted = n => b.controlOverride && Array.isArray(b.controlOverride.documents) && !b.controlOverride.documents.some(d => d && d.fileName === n);
   $("#wz-body").innerHTML = `${b.resubmissionOf ? `<div class="status-card info" style="padding:12px 16px;margin-bottom:16px"><b>Resubmission of <a href="#/job/${encodeURIComponent(b.resubmissionOf)}">${esc(b.resubmissionOf)}</a>.</b>
       The documents were copied from that job: remove or replace the ones that failed, then continue.</div>` : ""}<h2 style="font-size:17px">Documents</h2><p class="hint" style="margin:4px 0 16px">Every file you add is uploaded to the job's S3 folder and listed in the control file,
       the way eOCR stages a loan package. Remove a file to take it out of both.</p>
@@ -712,7 +719,7 @@ function wzDocs() {
       <button class="btn sm" data-test="locked">+ Password-protected PDF</button><button class="btn sm" data-test="corrupt">+ Corrupt PDF</button></div>
     <div class="card" style="margin-top:16px;box-shadow:none">${rows.length ? `<div class="tbl"><table><tr><th>File</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr>
       ${rows.map(d => `<tr data-file="${esc(d.fileName || d.name)}"><td class="mono">${esc(d.fileName || d.name)}${d.origin && d.origin !== "upload" ? `<div class="hint">${esc(d.origin)}</div>` : ""}</td><td>${esc(d.contentType || "")}</td>
-        <td>${bytes(d.bytes ?? d.size)}</td><td>${d.state === "done" ? pill("in S3 · in control file", "ok") : d.state === "error" ? pill(d.error, "bad")
+        <td>${bytes(d.bytes ?? d.size)}</td><td>${d.state === "done" ? (unlisted(d.fileName) ? pill("in S3 · not in control file", "warn") : pill("in S3 · in control file", "ok")) : d.state === "error" ? pill(d.error, "bad")
           : `<div class="bar"><i style="width:${Math.round((d.progress || 0) * 100)}%"></i></div>`}</td>
         <td>${d.state === "done" ? `<button class="btn sm ghost danger" data-rm="${esc(d.fileName)}" title="Remove">${icon("x")}</button>` : ""}</td></tr>`).join("")}</table></div>`
       : `<div class="empty">No documents yet. A loan package is usually one or more PDFs, one of them containing the NOTE.</div>`}</div>`;
@@ -918,6 +925,8 @@ function wzSubmit() {
           <input data-fr="${i}" value="${esc(f.reason || "")}" placeholder="reason contains (optional)" style="flex:1"><button class="btn sm ghost danger" data-fx="${i}">${icon("x")}</button></div>`).join("") || `<span class="hint">none</span>`}</div>
         <datalist id="x-files">${[...b.documents.map(d => d.fileName), b.controlFileName].map(n => `<option value="${esc(n)}">`).join("")}</datalist>
         <button class="btn sm" id="x-adddoc" style="margin-top:6px">${icon("plus")}Add a document</button></div>
+      ${(e.ignoredDocuments || []).length ? `<div style="margin-top:14px"><div style="font-weight:600;font-size:12.5px;margin-bottom:6px">Files ACE should report as not processed (ignoredDocuments)</div>
+        ${ignoredHtml(e.ignoredDocuments)}</div>` : ""}
       <label class="switch" style="margin-top:14px"><input type="checkbox" id="x-spec" ${e.specClean !== false ? "checked" : ""}><span><b>ACE must follow the spec</b><div class="hint">no spec deviations or validation findings</div></span></label>`;
     const sync = () => { e.title = $("#x-title").value; const c = $("#x-code").value; e.code = c === "" ? null : c === "REJECTED" ? c : +c;
       e.validationStatus = $("#x-vs").value || null; e.descriptionContains = $("#x-desc").value.split(",").map(t => t.trim()).filter(Boolean);
@@ -1066,7 +1075,8 @@ function tabOverview(b) {
         <div class="stat"><div class="v">${(b.callbacks || []).length}</div><div class="l">callback deliveries</div></div>
         <div class="stat"><div class="v">${applicable.filter(x => x.result === "passed").length}/${applicable.length}</div><div class="l">spec checks passed</div></div>
       </div>
-      ${(b.outcome || {}).description ? `<p style="margin:14px 0 0"><span class="hint">ACE said:</span> ${esc(b.outcome.description)}</p>` : ""}</div></div></div>`;
+      ${(b.outcome || {}).description ? `<p style="margin:14px 0 0"><span class="hint">ACE said:</span> ${esc(b.outcome.description)}</p>` : ""}
+      ${ignoredOf(b.outcome).length ? `<div style="margin:14px 0 0"><div class="hint" style="font-weight:600">Files ACE did not process</div>${ignoredHtml(ignoredOf(b.outcome))}</div>` : ""}</div></div></div>`;
 }
 function folderTable(cid, area, objects) {
   if (!objects.length) return `<div class="empty">Empty.</div>`;
@@ -1108,6 +1118,7 @@ function tabResult(b) {
       <dl class="kv"><dt>ACE said</dt><dd>${esc(o.description || "(empty)")}</dd><dt>Closed</dt><dd>${when(b.closedAt, true)} ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " (" + esc(b.closedByUser) + ")" : ""}</dd>
         <dt>Result file</dt><dd class="mono">${esc(o.batchPath || "none for this outcome")}</dd>
         ${(o.failedDocuments || []).length ? `<dt>Failed documents</dt><dd>${o.failedDocuments.map(f => `<div><span class="mono">${esc(f.documentName)}</span>: <b style="color:var(--bad)">${esc(f.reason)}</b></div>`).join("")}</dd>` : ""}
+        ${ignoredOf(o).length ? `<dt>Files ACE did not process</dt><dd>${ignoredHtml(ignoredOf(o))}</dd>` : ""}
         ${r.key ? `<dt>Checked</dt><dd>${r.ok ? pill("matches spec 6.4 / 6.5", "ok") : pill(`${r.errors.length} problem(s)`, "bad")}</dd>` : ""}</dl>
       ${r.errors && r.errors.length ? `<ul class="errs">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</div></div>
     ${s ? `<div class="card"><div class="card-h"><h3>Documents ACE found</h3><span class="sub">validationStatus ${esc(s.validationStatus)} · ${s.documentTypes} types · ${s.documents} documents · ${s.extractedFields} fields</span>
@@ -1146,7 +1157,7 @@ function tabCallbacks(b) {
         <td>${pill(c.answeredWith, c.answeredWith === 200 ? "ok" : "warn")}</td><td>${pill(`${s.code} ${s.value}`, s.code === 0 ? "ok" : "bad")}</td>
         <td class="mono" style="font-size:12px">${esc((c.callerPrincipal || "unsigned").split("/").slice(-2, -1)[0] || c.callerPrincipal || "unsigned")}</td>
         <td class="mono" style="font-size:12px">${esc(c.idempotencyKey || "—")}</td><td>${c.contractErrors.length ? pill(`${c.contractErrors.length} deviations`, "bad") : pill("ok", "ok")}</td></tr>
-        <tr><td></td><td colspan="6"><details><summary>payload, headers and checks</summary><pre style="margin-top:8px">${esc(JSON.stringify({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers}, null, 2))}</pre></details></td></tr>`; }).join("")}</table></div>`
+        <tr><td></td><td colspan="6">${ignoredOf(c.payload).length ? `<div style="margin-bottom:6px"><div class="hint" style="font-weight:600">Files ACE did not process</div>${ignoredHtml(ignoredOf(c.payload))}</div>` : ""}<details><summary>payload, headers and checks</summary><pre style="margin-top:8px">${esc(JSON.stringify({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers}, null, 2))}</pre></details></td></tr>`; }).join("")}</table></div>`
       : `<div class="empty">${b.aceJobId ? "ACE has not called back yet." : "The job has not been submitted."}</div>`}</div>`;
 }
 async function tabExchanges(b) {

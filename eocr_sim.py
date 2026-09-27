@@ -116,12 +116,41 @@ def check_output_rules(code, job_id, batch_path, failed, where):
     return errs
 
 
+IGNORED_REASONS = ("NOT_LISTED", "DUPLICATE")
+
+
+def ignored_documents(body):
+    """ignoredDocuments of a callback / Status API answer: files ACE did not process (in the folder but not listed,
+    or an exact copy of an earlier listed file). Older ACE builds do not send the field: missing means none."""
+    items = body.get("ignoredDocuments") if isinstance(body, dict) else None
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+
+def check_ignored(items, where):
+    """ignoredDocuments (optional; after failedDocuments): [{documentName, reason NOT_LISTED|DUPLICATE, duplicateOf only for DUPLICATE}]."""
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        return [f"{where}: ignoredDocuments must be an array"]
+    errs = []
+    for item in items:
+        if not isinstance(item, dict) or not {"documentName", "reason"} <= set(item) <= {"documentName", "reason", "duplicateOf"} \
+                or not all(isinstance(v, str) and v for v in item.values()):
+            errs.append(f"{where}: ignoredDocuments item must be {{documentName, reason[, duplicateOf]}}: {item}")
+        elif item["reason"] not in IGNORED_REASONS:
+            errs.append(f"{where}: ignoredDocuments reason {item['reason']!r} is not {' or '.join(IGNORED_REASONS)}: {item}")
+        elif (item["reason"] == "DUPLICATE") != ("duplicateOf" in item):
+            errs.append(f"{where}: ignoredDocuments duplicateOf belongs to (and only to) a DUPLICATE: {item}")
+    return errs
+
+
 def check_callback(payload):
     """Spec 5.1 / 6.x: flat, exact field set, terminal code, output rules, ISO-8601 UTC timestamp."""
     errs = []
     expected = {"aceJobId", "status", "batchPath", "failedDocuments", "timestamp"}
-    if set(payload) != expected:
-        errs.append(f"callback fields {sorted(payload)} != {sorted(expected)}")
+    if set(payload) - {"ignoredDocuments"} != expected:
+        errs.append(f"callback fields {sorted(payload)} != {sorted(expected)} (+ optional ignoredDocuments)")
+    errs += check_ignored(payload.get("ignoredDocuments"), "callback")
     status = payload.get("status", {})
     errs += check_status_object(status, "callback")
     code = status.get("code") if isinstance(status, dict) else None
@@ -137,8 +166,9 @@ def check_status_response(body, job_id):
     """Spec 7.3."""
     errs = []
     expected = {"aceJobId", "workflow", "status", "batchPath", "failedDocuments", "timestamp"}
-    if set(body) != expected:
-        errs.append(f"status API fields {sorted(body)} != {sorted(expected)}")
+    if set(body) - {"ignoredDocuments"} != expected:
+        errs.append(f"status API fields {sorted(body)} != {sorted(expected)} (+ optional ignoredDocuments)")
+    errs += check_ignored(body.get("ignoredDocuments"), "status API")
     if body.get("aceJobId") != job_id:
         errs.append(f"status API aceJobId {body.get('aceJobId')} != {job_id}")
     errs += check_status_object(body.get("status"), "status API")
@@ -320,13 +350,17 @@ def validation_view(batch):
         findings.append(f"Response.json says validationStatus FAILED but the outcome is {code} {outcome.get('value')}")
 
     failed = {f.get("documentName"): f.get("reason") for f in (outcome.get("failedDocuments") or []) if isinstance(f, dict)}
+    ignored = {f.get("documentName"): f for f in ignored_documents(outcome)}
     uploaded = {d["fileName"]: d for d in batch.get("documents") or []}
     listed = [d.get("fileName") for d in ((batch.get("controlFile") or {}).get("documents") or []) if isinstance(d, dict)]
     documents = []
     for name in list(uploaded) + [n for n in listed if n not in uploaded]:
         d = uploaded.get(name, {"fileName": name, "bytes": None})
         mine = [r for r in rows if r.get("fileName") == d["fileName"]]
-        precheck = (f"failed: {failed[name]}" if name in failed else "passed" if code in (0, 2000)
+        why = ignored.get(name) or {}
+        precheck = (f"failed: {failed[name]}" if name in failed
+                    else f"not processed: {why.get('reason')}" + (f" of {why['duplicateOf']}" if why.get("duplicateOf") else "") if why
+                    else "passed" if code in (0, 2000)
                     else "no failure reported" if code == 1000 else None)
         documents.append({"fileName": d["fileName"], "bytes": d.get("bytes"), "precheck": precheck,
                           "note": None if name in uploaded and name in listed else "listed in the control file, not uploaded" if name not in uploaded
@@ -334,11 +368,16 @@ def validation_view(batch):
                           "types": sorted({r.get("documentType") for r in mine}), "pages": ", ".join(str(r.get("pageRange")) for r in mine),
                           "extractedFields": sum(len(r.get("fields") or {}) for r in mine),
                           "duplicates": sorted({str(r.get("duplicatePagesOf")) for r in mine if r.get("duplicatePagesOf")})})
-        if code in (0, 2000) and rows and not mine and d["fileName"] not in failed:
+        if code in (0, 2000) and rows and not mine and d["fileName"] not in failed and d["fileName"] not in ignored and d["fileName"] in listed:
             findings.append(f"{d['fileName']} passed pre-check but is not in Response.json")
     for name in failed:
         if name not in uploaded and name not in listed and name != batch.get("controlFileName"):
             findings.append(f"failedDocuments names {name}, which was not submitted")
+    for name, f in ignored.items():
+        if name not in uploaded and name not in listed:
+            findings.append(f"ignoredDocuments names {name}, which was not submitted")
+        elif f.get("reason") == "DUPLICATE" and f.get("duplicateOf") not in listed:
+            findings.append(f"ignoredDocuments says {name} duplicates {f.get('duplicateOf')}, which is not a listed document")
     ran = code in (0, 2000) or status in ("PASSED", "FAILED")
     return {"validationStatus": status, "ran": ran, "stoppedAt": None if ran or code is None else outcome.get("value") or st.get("value"),
             "description": description, "fields": fields, "documents": documents, "findings": findings,
@@ -381,7 +420,7 @@ def spec_checklist(batch):
             [] if cb or not closed else [f"no callback received; closed by {batch.get('closedBy')}"], bool(cb), "waiting for ACE"),
         row("5.1, 5.2, 6.1-6.3", "Callback payload: flat fields, numeric terminal code matching value, batchPath / failedDocuments rules, ISO 8601 UTC timestamp, application/json",
             bool(cb) or (submitted and not closed), pick(cb_errs, "callback"), bool(cb), "waiting for ACE"),
-        row("5, 7", "Callback agrees with the Status API (status, batchPath, failedDocuments)", bool(cb), pick(status_errs, "callback differs"), bool(cb)),
+        row("5, 7", "Callback agrees with the Status API (status, batchPath, failedDocuments, ignoredDocuments)", bool(cb), pick(status_errs, "callback differs"), bool(cb)),
         row("3.3 step 7, 6.4, 6.5", "*Response.json retrieved: one per batch, exact schema, Documents items, pageRange and confidence by page, extraction rules, validationStatus",
             bool(outcome.get("batchPath")) or (submitted and not closed), res_errs, bool(result.get("key")), "written on COMPLETED / VALIDATION_FAILED"),
         row("6.3, 6.5, 3.2", "NOTE validation and document results consistent with the control file and the package",
@@ -421,6 +460,13 @@ def evaluate_expectation(batch):
         name, reason = f.get("documentName"), str(f.get("reason") or "")
         add(f"Failed document {name}", reason or "listed as failed", got.get(name, "not listed"),
             name in got and reason.lower() in got[name].lower())
+    got_ignored = {d.get("documentName"): d for d in ignored_documents(o)}
+    for f in exp.get("ignoredDocuments") or []:
+        name, g = f.get("documentName"), got_ignored.get(f.get("documentName")) or {}
+        want = f.get("reason", "") + (f" of {f['duplicateOf']}" if f.get("duplicateOf") else "")
+        actual = (g.get("reason", "") + (f" of {g['duplicateOf']}" if g.get("duplicateOf") else "")) if g else "not listed"
+        add(f"Not processed: {name}", want or "listed as not processed", actual,
+            bool(g) and (not f.get("reason") or g.get("reason") == f["reason"]) and (not f.get("duplicateOf") or g.get("duplicateOf") == f["duplicateOf"]))
     if exp.get("validationStatus"):
         vs = (batch.get("validation") or {}).get("validationStatus")
         add("NOTE validation", exp["validationStatus"], vs or "not reported", vs == exp["validationStatus"])
@@ -1125,6 +1171,8 @@ def on_callback(job_id, record):
         if isinstance(body, dict) and code == 200:
             record_status(b, body, "callback reconciliation", meta.get("contentType"))
             diff = [f for f in ("status", "batchPath", "failedDocuments") if body.get(f) != p.get(f)]
+            if ignored_documents(body) != ignored_documents(p):
+                diff.append("ignoredDocuments")
             if diff:
                 msg = "callback differs from Status API in " + ", ".join(f"{f} (callback {p.get(f)!r}, Status API {body.get(f)!r})" for f in diff)
                 if msg not in b["contractErrors"]:
@@ -1138,7 +1186,8 @@ def on_callback(job_id, record):
                       errors=result["errors"], **{k: v for k, v in (result["summary"] or {}).items() if k != "rows"})
         b.update(state="CLOSED", closedAt=now_iso(), closedBy="callback",
                  outcome={"code": st.get("code"), "value": st.get("value"), "description": st.get("description"),
-                          "batchPath": p.get("batchPath"), "failedDocuments": p.get("failedDocuments")})
+                          "batchPath": p.get("batchPath"), "failedDocuments": p.get("failedDocuments"),
+                          "ignoredDocuments": ignored_documents(p)})
         _validate(b)
         _judge(b)
         add_event(b, "closed", f"execution closed on callback: {st.get('code')} {st.get('value')}")
@@ -1571,6 +1620,8 @@ class Scenario:
         for field in ("status", "batchPath", "failedDocuments"):
             if p[field] != final[field]:
                 self.err(f"callback {field} {p[field]} differs from Status API {final[field]}")
+        if ignored_documents(p) != ignored_documents(final):
+            self.err(f"callback ignoredDocuments {ignored_documents(p)} differs from Status API {ignored_documents(final)}")
         self.result["callback"] = p
         if code == 1000:
             got = {f["documentName"]: f["reason"] for f in p["failedDocuments"]}

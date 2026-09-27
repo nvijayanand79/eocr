@@ -18,8 +18,12 @@ Faults, to check that the simulator reports them: put "simulate": "<fault>" in t
   status-regress      the Status API goes from COMPLETED back to IN_PROGRESS before the callback
   bad-confidence      a confidence percentage for a page outside pageRange, another above 100
   extra-response      a second *Response.json next to the first      odd-name  result file not named *Response.json
+  old-ace             Status API and callback without ignoredDocuments (ACE builds before the field)
+Files in the folder that the control file does not list, and exact byte copies of an earlier listed file, are left
+out and reported in ignoredDocuments (NOT_LISTED / DUPLICATE with duplicateOf), like ACE's SKIP_AND_REPORT policy.
 A loanId starting with ACK200 is accepted with HTTP 200 instead of 202.
 """
+import hashlib
 import io
 import json
 import os
@@ -57,9 +61,12 @@ def ts(job=None):
 
 
 def set_status(job, stage, state, code, value, description, batch_path="", failed=None):
+    ignored = [i for i in job.get("ignored", []) if code != 1000 or i["reason"] == "NOT_LISTED"]  # a 1000 lists NOT_LISTED only
     job["status"] = {"aceJobId": job["id"], "workflow": {"stage": stage, "state": state},
                      "status": {"code": code, "value": value, "description": description},
-                     "batchPath": batch_path, "failedDocuments": failed or [], "timestamp": ts(job)}
+                     "batchPath": batch_path, "failedDocuments": failed or [], "ignoredDocuments": ignored, "timestamp": ts(job)}
+    if job.get("fault") == "old-ace":
+        del job["status"]["ignoredDocuments"]
 
 
 def precheck(job):
@@ -78,6 +85,11 @@ def precheck(job):
         return control, [{"documentName": name, "reason": "Loan ID Mismatch" if info.get("loanId") != job["loanId"] else "Correlation ID Mismatch"}]
     failed = []
     job["pages"] = {}
+    job["fault"] = info.get("simulate", "")
+    listed = [d.get("fileName") for d in control.get("documents") or []]
+    present = [o["Key"][len(folder):] for o in s3.list_objects_v2(Bucket=INTAKE, Prefix=folder).get("Contents", []) if "/" not in o["Key"][len(folder):]]
+    job["ignored"] = [{"documentName": n, "reason": "NOT_LISTED"} for n in sorted(present) if n != name and n not in listed]
+    seen = {}
     for d in control.get("documents") or []:
         fname = d.get("fileName")
         try:
@@ -85,6 +97,11 @@ def precheck(job):
         except Exception:
             failed.append({"documentName": fname, "reason": "File Not Found"})
             continue
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in seen:
+            job["ignored"].append({"documentName": fname, "reason": "DUPLICATE", "duplicateOf": seen[digest]})
+            continue
+        seen[digest] = fname
         try:
             reader = PdfReader(io.BytesIO(data))
             if reader.is_encrypted:
@@ -121,7 +138,7 @@ def response_file(job, control, extraction):
 
 
 def callback(job, override=None):
-    payload = {k: job["status"][k] for k in ("aceJobId", "status", "batchPath", "failedDocuments", "timestamp")}
+    payload = {k: job["status"][k] for k in ("aceJobId", "status", "batchPath", "failedDocuments", "ignoredDocuments", "timestamp") if k in job["status"]}
     body = json.dumps(override(payload) if override else payload).encode()
     key = str(uuid.uuid4())
     for attempt in range(8):
@@ -236,7 +253,7 @@ class Handler(BaseHTTPRequestHandler):
         job = jobs.get(m.group(1))
         if not job:
             return self.reply(200, {"aceJobId": m.group(1), "workflow": {}, "status": {"code": 4040, "value": "JOB_NOT_FOUND",
-                                    "description": "No processing request found for the specified aceJobId."}, "batchPath": "", "failedDocuments": [], "timestamp": ts()})
+                                    "description": "No processing request found for the specified aceJobId."}, "batchPath": "", "failedDocuments": [], "ignoredDocuments": [], "timestamp": ts()})
         self.reply(200, job["status"], "text/plain" if job.get("fault") == "text-content-type" else "application/json")
 
     def do_POST(self):
