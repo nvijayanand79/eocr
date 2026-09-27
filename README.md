@@ -32,7 +32,39 @@ Test data is read from `s3://<config>/test-data/eocr/`: `loan.json`
 ## Operator console (initiate, track and close by hand)
 
 `serve` also runs a browser console on port `8081` that lets a person act as eOCR for one loan at a time, with every
-step traced end to end:
+step traced end to end.
+
+**Screens.** A side navigation leads to:
+
+- **Dashboard**: tiles (submitted in 24 h, in progress, completed %, failed, average time to callback, needing
+  attention; each opens the filtered job list), *Needs attention* with the reason for each job, *In progress* and
+  *Recently finished*, each row with a five-segment progress bar (prepared, submitted, ACE, callback, closed).
+- **Jobs**: every job with status, progress, where it is, who submitted it and when, and how long it took; filters
+  (needs attention, in progress, drafts, completed, failed, finished), search, "only mine", paging and CSV export.
+- **New job**: a full-page wizard. 1 *Loan details* (the control file's loanInfo, extraction on/off, fill from the
+  test loan) · 2 *Documents* (drag and drop or pick files; each uploads straight into the job's S3 folder with a
+  progress bar; test files: a loan package slice with the NOTE, a password-protected PDF, a corrupt PDF) ·
+  3 *Control file* (generated from steps 1 and 2 and checked against spec 3.2; hand editing for negative tests) ·
+  4 *Check S3 folder* (the objects S3 actually holds, each with its role, against the control file) · 5 *Submit*
+  (ACE endpoint, batchPath, simulated callback outage, the exact request). A side panel shows the job, the target S3
+  folder and its files throughout; progress is saved at every step, and a draft reopens where it stopped.
+- **Job page** (one per submission):
+  - a status panel in plain words: what is happening, or what went wrong, *where* (the failed stage), each affected
+    item with its problem and how to fix it (a rejected document and the reason; a loan field with the control-file
+    value against the NOTE value; ACE's refusal), what to do next, and one-click actions (resubmit as a new job, open
+    the HITL review, close from the Status API, copy a failure summary);
+  - **Where the job is**: a stage track of the eOCR steps and every stage ACE reports, each with its time and
+    duration, the current step highlighted and the failed one in red;
+  - tabs: *Overview* (what was sent and what came back), *Files in S3* (the input folder, ACE's output folder and
+    the simulator records, with role, size, time, view and download), *Result*, *Validation*, *Callbacks*,
+    *Spec compliance*, *Activity*.
+- **Callbacks** and **Scenario runs**.
+
+"Resubmit as new job" copies the package into a new job and opens its wizard at *Documents*, so the failing files
+can be replaced first. Files are viewed inline only for PDF, images, JSON and text, and every file response is
+sandboxed, so nothing uploaded can run inside the console.
+
+The steps and the spec sections behind them:
 
 | Step | What the console does | Spec |
 |---|---|---|

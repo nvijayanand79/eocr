@@ -394,6 +394,188 @@ def spec_checklist(batch):
     return rows
 
 
+# ------------------------------------------------------------------ where the job is, and what went wrong (for people)
+
+ACE_STAGE_ORDER = ["COLLATION", "PRECHECK", "CLASSIFICATION", "EXTRACTION", "VALIDATION", "COMPLETED"]
+STAGE_LABELS = {"COLLATION": "Collation", "PRECHECK": "Pre-check", "CLASSIFICATION": "Classification", "EXTRACTION": "Extraction",
+                "VALIDATION": "Validation", "COMPLETED": "Completed", "PROCESSING": "Processing"}
+FIX = {
+    "password protected": "Remove the password from the PDF (or export an unprotected copy), then submit again as a new job.",
+    "corrupted": "The file cannot be opened as a PDF. Re-export or re-scan it, then submit again as a new job.",
+    "file not found": "The control file lists a document that is not in the S3 folder. Upload it, or leave it out of the control file.",
+    "loan id mismatch": "loanInfo.loanId in the control file must equal the loan of the folder and of the request.",
+    "correlation id mismatch": "loanInfo.correlationId in the control file must equal the execution's correlationId.",
+    "control file missing or invalid": "Write the control file again (valid JSON, named as in batchPath).",
+    "no documents listed": "Add at least one document to the package.",
+}
+
+
+def _iso_ts(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def stage_track(batch):
+    """The job as a line of steps: eOCR prepares and submits, ACE works through its stages, eOCR receives and closes."""
+    steps = []
+    state, outcome = batch["state"], batch.get("outcome") or {}
+    code = outcome.get("code")
+    cb, result = batch.get("callback") or {}, batch.get("result") or {}
+    closed, submitted = state == "CLOSED", bool(batch.get("aceJobId"))
+
+    def add(key, label, side, status, at=None, note=None):
+        steps.append({"key": key, "label": label, "side": side, "status": status, "at": at, "note": note})
+
+    staged_at = next((e["at"] for e in reversed(batch.get("events") or []) if e.get("type") == "staged"), None)
+    docs = batch.get("documents") or []
+    add("documents", "Documents", "eOCR", "done" if docs and state != "DRAFT" or (docs and staged_at) else "current" if state == "DRAFT" else "done",
+        min((d.get("uploadedAt") for d in docs if d.get("uploadedAt")), default=batch.get("createdAt")), f"{len(docs)} file(s)")
+    add("control", "Control file", "eOCR", "done" if state not in ("DRAFT",) else "current" if docs else "upcoming", staged_at,
+        batch.get("controlFileName"))
+    add("submit", "Submitted to ACE", "eOCR", "failed" if state == "REJECTED" else "done" if submitted else "current" if state == "STAGED" else "upcoming",
+        batch.get("submittedAt"), batch.get("aceJobId") or ("refused by ACE" if state == "REJECTED" else None))
+
+    groups = []
+    for s in batch.get("stages") or []:
+        stage = (s.get("key") or [None])[0] or "QUEUED"
+        if groups and groups[-1]["stage"] == stage:
+            groups[-1]["states"].append(s["key"][1])
+            groups[-1]["last"] = s
+        else:
+            groups.append({"stage": stage, "at": s.get("at"), "states": [s["key"][1]], "last": s})
+    final = ((batch.get("status") or {}).get("status") or {}).get("code")
+    terminal = final in TERMINAL or code in (0, 1000, 2000, 3000)
+    failed_code = code if code in (1000, 2000, 3000) else final if final in (1000, 2000, 3000) else None
+    for i, g in enumerate(groups):
+        last = i == len(groups) - 1
+        states = [x for x in g["states"] if x]
+        status = "done"
+        if last and failed_code:
+            status = "failed"
+        elif last and not terminal and not closed:
+            status = "waiting" if "HITL_PENDING" in states else "current"
+        add(f"ace-{g['stage']}", STAGE_LABELS.get(g["stage"], g["stage"].title()), "ACE", status, g["at"],
+            " → ".join(dict.fromkeys(states)) or None)
+    if submitted and not groups:
+        add("ace-wait", "ACE processing", "ACE", "current" if not closed else "done", None, "waiting for the first status")
+    if submitted and not terminal and not closed:
+        seen = [ACE_STAGE_ORDER.index(g["stage"]) for g in groups if g["stage"] in ACE_STAGE_ORDER]
+        for stage in ACE_STAGE_ORDER[(max(seen) + 1) if seen else 0:]:
+            add(f"ace-{stage}", STAGE_LABELS[stage], "ACE", "upcoming", None, "expected")
+
+    if cb:
+        add("callback", "Callback received", "eOCR", "failed" if cb.get("contractErrors") else "done", cb.get("receivedAt"),
+            f"attempt {cb.get('attempt')}" + (" · off-spec" if cb.get("contractErrors") else ""))
+    elif closed and outcome.get("value") != "ABANDONED":
+        add("callback", "Callback received", "eOCR", "failed", None, "never received")
+    elif submitted and not closed:
+        add("callback", "Callback received", "eOCR", "current" if terminal else "upcoming", None, "waiting for ACE" if terminal else None)
+    elif state != "REJECTED":
+        add("callback", "Callback received", "eOCR", "upcoming")
+    if outcome.get("batchPath") or (submitted and not closed and state != "REJECTED"):
+        add("result", "Result file checked", "eOCR", "failed" if result.get("key") and not result.get("ok") else "done" if result.get("key")
+            else "upcoming", batch.get("closedAt") if result.get("key") else None, (result.get("key") or "").rsplit("/", 1)[-1] or None)
+    if state != "REJECTED":
+        add("closed", "Closed", "eOCR", "done" if closed else "upcoming", batch.get("closedAt"),
+            {"callback": "on ACE's callback", "reconciliation": "from the Status API", "manual": "by hand"}.get(batch.get("closedBy")))
+    for i, st in enumerate(steps):  # how long each step took: until the next step that has a time
+        nxt = next((x["at"] for x in steps[i + 1:] if x.get("at")), None)
+        a, b = _iso_ts(st.get("at")), _iso_ts(nxt)
+        st["seconds"] = round(b - a) if a is not None and b is not None and b >= a else None
+    return steps
+
+
+def explain(batch):
+    """Plain-language account of where the job stands or what went wrong, which items are affected and what to do."""
+    state, outcome = batch["state"], batch.get("outcome") or {}
+    code, st = outcome.get("code"), (batch.get("status") or {}).get("status") or {}
+    wf = (batch.get("status") or {}).get("workflow") or {}
+    v = batch.get("validation") or validation_view(batch)
+    checklist = spec_checklist(batch)
+    deviations = [{"clause": r["clause"], "check": r["check"], "errors": r["errors"]} for r in checklist if r["result"] == "failed"
+                  and not r["clause"].startswith("3.")]
+    ours = [e for r in checklist if r["result"] == "failed" and r["clause"].startswith("3.") and r["clause"] != "3.3 step 7, 6.4, 6.5"
+            for e in r["errors"]]
+    last_stage = STAGE_LABELS.get(wf.get("stage"), wf.get("stage")) if wf.get("stage") else None
+    job = batch.get("aceJobId")
+    r = {"tone": "info", "headline": "", "summary": "", "stage": None, "items": [], "next": [], "deviations": deviations, "packageIssues": ours}
+
+    if state == "DRAFT":
+        r.update(tone="idle", headline="Not submitted yet", summary="Finish the package: add documents and write the control file.",
+                 next=["Open the setup and continue where you left off."])
+    elif state == "STAGED":
+        r.update(tone="info", headline="Ready to submit", summary="The documents and the control file are in S3. Submit the job to ACE.",
+                 next=["Review the S3 folder, then submit."])
+    elif state == "REJECTED":
+        ev = next((e for e in reversed(batch.get("events") or []) if e.get("type") == "rejected"), {})
+        resp = (ev.get("data") or {}).get("response")
+        reason = (resp or {}).get("error") or (resp or {}).get("message") if isinstance(resp, dict) else resp
+        r.update(tone="bad", stage="Submission", headline="ACE refused the submission",
+                 summary=f"The onboarding request was answered with {ev.get('message', 'an error')}.",
+                 items=[{"subject": "Onboarding request", "problem": str(reason or "no reason given"),
+                         "fix": "Check the loan exists in ACE, the batchPath and the ACE endpoint; then submit again."}],
+                 next=["Correct the request and submit again (the package is kept).", "If the loan should be known to ACE, give the ACE team the loanId and the time."])
+    elif state != "CLOSED":
+        if wf.get("state") == "HITL_PENDING":
+            r.update(tone="warn", stage=last_stage, headline="Waiting for a HITL review",
+                     summary="ACE paused for a person to confirm loan data it could not match.",
+                     next=["Open the review, confirm or reject each field, and send the decision."])
+        elif batch.get("callbackOverdue"):
+            r.update(tone="bad", stage="Callback", headline="ACE finished but has not called back",
+                     summary=f"ACE reports {st.get('code')} {st.get('value')}, but no callback has reached the eOCR endpoint.",
+                     next=["Wait a little longer, or close the job from the Status API (Close → reconciliation).",
+                           f"Ask the ACE team why the callback for {job} was not delivered."])
+        elif st.get("code") in TERMINAL:
+            r.update(tone="info", stage="Callback", headline=f"ACE finished ({st.get('value')}); waiting for its callback",
+                     summary="The job closes on its own when the callback arrives.")
+        else:
+            r.update(tone="info", stage=last_stage, headline=f"ACE is processing{': ' + last_stage if last_stage else ''}",
+                     summary=st.get("description") or "Waiting for the first status from ACE.")
+    elif outcome.get("value") == "ABANDONED":
+        r.update(tone="warn", headline="Closed by hand before ACE finished", summary=outcome.get("description") or "",
+                 next=["Resubmit as a new job if it still needs processing."])
+    elif code not in (0, 1000, 2000, 3000):
+        r.update(tone="bad", stage="Callback", headline="ACE sent an invalid callback",
+                 summary=f"Its status was code {code!r} / value {outcome.get('value')!r}, which the spec does not allow. "
+                         f"ACE's Status API says {st.get('code')} {st.get('value')}.",
+                 next=["Report the deviations below to the ACE team with the aceJobId."])
+    elif code == 1000:
+        failed = [f for f in outcome.get("failedDocuments") or [] if isinstance(f, dict)]
+        r.update(tone="bad", stage="Pre-check", headline=f"Pre-check failed: {len(failed)} item(s) rejected",
+                 summary=outcome.get("description") or "",
+                 items=[{"subject": f.get("documentName"), "problem": f.get("reason"),
+                         "fix": FIX.get(str(f.get("reason", "")).lower(), "Correct the file and submit again as a new job.")} for f in failed],
+                 next=["Fix the items listed above, then use “Resubmit as new job”: it copies the package, and you replace or remove the bad files before submitting.",
+                       "No result file is written for a pre-check failure."])
+    elif code == 2000:
+        bad = [f for f in v.get("fields") or [] if f.get("ace") == "mismatch" or f.get("hitlDecision") is False]
+        r.update(tone="bad", stage="Validation", headline="NOTE validation failed: " + (", ".join(f["label"] for f in bad) or "loan data does not match"),
+                 summary=outcome.get("description") or "",
+                 items=[{"subject": f["label"], "problem": f"control file says {f['control']!r}, the NOTE shows {f['extracted']!r}" if f.get("extracted") is not None
+                         else f"control file says {f['control']!r}; ACE found a different value",
+                         "fix": f"If {f['control']!r} is wrong, correct {f['field']} in the control file; if it is right, the NOTE needs review."} for f in bad],
+                 next=["Correct the loan data and resubmit as a new job, or confirm the NOTE is the wrong document.",
+                       "The result file lists the documents ACE classified; it has no extracted fields (spec 6.5)."])
+    elif code == 3000:
+        r.update(tone="bad", stage=last_stage or "Processing", headline="ACE could not process the package",
+                 summary=outcome.get("description") or "Unexpected processing or system failure.",
+                 items=[{"subject": f"ACE job {job}", "problem": outcome.get("description") or "processing failure",
+                         "fix": "Usually not caused by the package. Retry as a new job; if it repeats, report it."}],
+                 next=["Resubmit as a new job.", f"If it fails again, give the ACE team the aceJobId {job} and the time it failed."])
+    else:
+        problems = deviations or v.get("findings")
+        r.update(tone="warn" if problems else "ok", stage=None,
+                 headline="Completed, but the result has problems" if problems else "Completed",
+                 summary=outcome.get("description") or "",
+                 items=[{"subject": "Validation", "problem": f, "fix": "Report to the ACE team with the aceJobId."} for f in v.get("findings") or []],
+                 next=["Report the problems below to the ACE team with the aceJobId."] if problems else ["Nothing to do. The result file is in the Files tab."])
+    if state == "CLOSED" and batch.get("closedBy") == "reconciliation":
+        r["summary"] = (r["summary"] + " Closed from the Status API: ACE never called back.").strip()
+    return r
+
+
 # ------------------------------------------------------------------ batch ledger (eOCR's record of each execution)
 #
 # One JSON document per eOCR execution (correlationId) in s3://<intake>/eocr-sim/batches/, updated with S3

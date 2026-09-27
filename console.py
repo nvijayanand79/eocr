@@ -408,8 +408,73 @@ def detail(cid):
     if batch["state"] != "CLOSED" or not batch.get("validation"):
         batch["validation"] = sim.validation_view(batch)  # live view while open; frozen at close
     batch["specChecklist"] = sim.spec_checklist(batch)
+    batch["stageTrack"] = sim.stage_track(batch)
+    batch["explain"] = sim.explain(batch)
     batch["s3"] = {"intake": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "output": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None}
     return batch
+
+
+def _listing(bucket, prefix, limit=500):
+    out = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for o in page.get("Contents", []):
+            out.append({"name": o["Key"][len(prefix):], "key": o["Key"], "bytes": o["Size"], "modified": o["LastModified"].isoformat()})
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def folders(cid):
+    """What is actually in S3 for this job: the intake folder eOCR staged, ACE's output folder, and the simulator's records."""
+    batch = get(cid)
+    control = batch.get("controlFile") if isinstance(batch.get("controlFile"), dict) else sim.build_control_file(batch)
+    listed = {d.get("fileName"): d.get("contentType") for d in (control.get("documents") or []) if isinstance(d, dict)} if isinstance(control, dict) else {}
+    uploaded = {d["fileName"]: d for d in batch.get("documents") or []}
+    inp = _listing(INTAKE_BUCKET, batch["folder"])
+    for o in inp:
+        o["role"] = "control file" if o["name"] == batch["controlFileName"] else "document" if o["name"] in listed else "not in control file"
+        o["contentType"] = listed.get(o["name"]) or (uploaded.get(o["name"]) or {}).get("contentType")
+    present = {o["name"] for o in inp}
+    missing = [n for n in listed if n not in present]
+    out = []
+    if batch.get("aceJobId"):
+        out = _listing(OUTPUT_BUCKET, f"{batch['aceJobId']}/")
+        result = (batch.get("outcome") or {}).get("batchPath") or ((batch.get("status") or {}).get("batchPath"))
+        for o in out:
+            o["role"] = "result file (batchPath)" if o["key"] == result else "*Response.json" if o["name"].endswith("Response.json") else "other"
+    return {"input": {"location": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "objects": inp, "missing": missing,
+                      "controlWritten": batch["controlFileName"] in present},
+            "output": {"location": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None, "objects": out},
+            "records": {"location": f"{sim.STORE_LABEL}{sim.RECORD_PREFIX}{cid}/", "objects": sim.list_records(cid)}}
+
+
+MAX_DOWNLOAD = 100 * 1024 * 1024
+
+
+def fetch_object(cid, area, name, inline=False):
+    """One object from the job's own folders (never anything else), for viewing or download."""
+    batch = get(cid)
+    if area == "records":
+        doc = sim.read_record(cid, name)
+        return Download(json.dumps(doc, indent=2, default=str).encode(), "application/json", name, inline)
+    if area == "input":
+        bucket, prefix = INTAKE_BUCKET, batch["folder"]
+    elif area == "output" and batch.get("aceJobId"):
+        bucket, prefix = OUTPUT_BUCKET, f"{batch['aceJobId']}/"
+    else:
+        raise KeyError(area)
+    if not name or name.startswith("/") or ".." in name.split("/"):
+        raise KeyError(name)
+    try:
+        head = s3.head_object(Bucket=bucket, Key=prefix + name)
+    except Exception:
+        raise KeyError(name) from None
+    if head["ContentLength"] > MAX_DOWNLOAD:
+        raise ValueError(f"{name} is {head['ContentLength'] // 1048576} MB; download it from s3://{bucket}/{prefix}{name} instead")
+    body = s3.get_object(Bucket=bucket, Key=prefix + name)["Body"].read()
+    ctype = head.get("ContentType") or CONTENT_TYPES.get(os.path.splitext(name)[1].lower(), "application/octet-stream")
+    safe_inline = ctype.split(";")[0].strip() in ("application/pdf", "application/json", "text/plain", "image/png", "image/jpeg", "image/tiff")
+    return Download(body, ctype if safe_inline or not inline else "application/octet-stream", name.rsplit("/", 1)[-1], inline and safe_inline)
 
 
 def reports():
@@ -529,7 +594,16 @@ def _list(h, q):
     state, me = q.get("state", ""), sim.operator()
     if q.get("mine") and me:
         rows = [r for r in rows if me in (r.get("createdBy"), r.get("submittedBy"))]
-    if state == "open":
+    result = q.get("result", "")
+    if result == "ok":
+        rows = [r for r in rows if r["state"] == "CLOSED" and (r.get("outcome") or {}).get("code") == 0]
+    elif result == "failed":
+        rows = [r for r in rows if r["state"] == "REJECTED" or (r["state"] == "CLOSED" and (r.get("outcome") or {}).get("code") != 0)]
+    if state == "setup":
+        rows = [r for r in rows if r["state"] in ("DRAFT", "STAGED")]
+    elif state == "running":
+        rows = [r for r in rows if r["state"] in ("SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED")]
+    elif state == "open":
         rows = [r for r in rows if r["state"] not in ("CLOSED", "REJECTED")]
     elif state == "attention":
         rows = [r for r in rows if sim.needs_attention(r)]
@@ -650,8 +724,8 @@ def _record(h, q, cid, name):
 
 
 class Download:
-    def __init__(self, data, content_type, filename):
-        self.data, self.content_type, self.filename = data, content_type, filename
+    def __init__(self, data, content_type, filename, inline=False):
+        self.data, self.content_type, self.filename, self.inline = data, content_type, filename, inline
 
 
 def to_csv(rows, columns, filename):
@@ -704,6 +778,16 @@ def _export_callbacks(h, q):
     ], f"eocr-callbacks-{sim.now_iso()[:10]}.csv")
 
 
+@route("GET", CID + r"/folders")
+def _folders(h, q, cid):
+    return folders(cid)
+
+
+@route("GET", CID + r"/object")
+def _object(h, q, cid):
+    return fetch_object(cid, q.get("area", ""), q.get("name", ""), q.get("inline") == "1")
+
+
 @route("GET", r"/api/reports")
 def _reports(h, q):
     return reports()
@@ -722,7 +806,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return body
 
-    def _send(self, code, data, content_type="application/json", filename=None):
+    def _send(self, code, data, content_type="application/json", filename=None, inline=False):
         if not isinstance(data, bytes):
             data = json.dumps(data, default=str).encode()
         self.send_response(code)
@@ -734,7 +818,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Strict-Transport-Security", "max-age=31536000")
         if filename:
-            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            safe = re.sub(r'[^\w .()-]', "_", filename)
+            self.send_header("Content-Security-Policy", "sandbox")  # a file from S3 never runs as part of the console
+            self.send_header("Content-Disposition", f'{"inline" if inline else "attachment"}; filename="{safe}"')
         if getattr(self, "cookie", None):
             self.send_header("Set-Cookie", self.cookie)
         self.end_headers()
@@ -768,7 +854,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 try:
                     result = fn(self, q, **match.groupdict())
                     if isinstance(result, Download):
-                        return self._send(200, result.data, result.content_type, result.filename)
+                        return self._send(200, result.data, result.content_type, result.filename, getattr(result, "inline", False))
                     return self._send(200, result)
                 except KeyError as exc:
                     return self._send(404, {"error": f"not found: {exc.args[0] if exc.args else ''}"})

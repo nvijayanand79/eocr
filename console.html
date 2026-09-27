@@ -3,245 +3,316 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>eOCR Simulator Console</title>
+<title>eOCR Simulator</title>
 <style>
 :root {
-  --bg: #f5f6f8; --panel: #ffffff; --ink: #1c2330; --muted: #5d6778; --line: #dde1e8; --soft: #eef1f5;
-  --accent: #2456c9; --accent-ink: #ffffff; --ok: #16794a; --ok-bg: #e3f4ea; --warn: #9a5b00; --warn-bg: #fdf1dc;
-  --bad: #b3261e; --bad-bg: #fbe5e3; --info: #2456c9; --info-bg: #e5ecfb; --idle: #5d6778; --idle-bg: #eceef2;
+  --bg: #f5f6f8; --surface: #ffffff; --sunken: #f0f2f5; --ink: #111827; --ink-2: #374151; --muted: #6b7280; --line: #e5e7eb; --line-2: #d1d5db;
+  --brand: #3b5bdb; --brand-ink: #ffffff; --brand-soft: #edf1fd;
+  --ok: #15803d; --ok-bg: #e8f6ee; --ok-line: #b7e3c8;
+  --warn: #a15c07; --warn-bg: #fdf3e1; --warn-line: #f3d49b;
+  --bad: #c0262d; --bad-bg: #fdecec; --bad-line: #f5c0c2;
+  --info: #3b5bdb; --info-bg: #edf1fd; --info-line: #c6d2f7;
+  --idle: #6b7280; --idle-bg: #f1f2f4; --idle-line: #dfe2e6;
+  --ace: #7c3aed; --ace-bg: #f3eefe;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12151b; --panel: #1a1e26; --ink: #e5e8ee; --muted: #9aa3b2; --line: #2c323d; --soft: #222833;
-    --accent: #6f9bff; --accent-ink: #0d1220; --ok: #5fd39a; --ok-bg: #173325; --warn: #f0b75a; --warn-bg: #3a2c12;
-    --bad: #ff8a80; --bad-bg: #3d1c1a; --info: #8fb0ff; --info-bg: #1d2a47; --idle: #9aa3b2; --idle-bg: #262b35;
+    --bg: #0f1115; --surface: #171a21; --sunken: #1d212a; --ink: #eef0f4; --ink-2: #d3d7df; --muted: #9aa3b2; --line: #2a2f3a; --line-2: #394050;
+    --brand: #7b93ff; --brand-ink: #0c1024; --brand-soft: #1e2645;
+    --ok: #57d18f; --ok-bg: #11291d; --ok-line: #1f4b33;
+    --warn: #f2b660; --warn-bg: #2f230f; --warn-line: #5a431b;
+    --bad: #ff8b85; --bad-bg: #331618; --bad-line: #5c2a2d;
+    --info: #8ea3ff; --info-bg: #1a2242; --info-line: #2f3c70;
+    --idle: #9aa3b2; --idle-bg: #232833; --idle-line: #343a47;
+    --ace: #b794f6; --ace-bg: #261d3d;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
   }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-#view-rep, #view-pipe, #view-cb { display: block; }
-.board { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; align-items: start; }
-.empties { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
-.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
-.stat .v { font-size: 22px; font-weight: 650; line-height: 1.2; }
-.stat .l { color: var(--muted); font-size: 12px; }
-.stat.click { cursor: pointer; } .stat.click:hover, .stat.on { border-color: var(--accent); }
-.stat.attn .v { color: var(--bad); }
-.badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--bad); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
-.banner { display: flex; gap: 14px; align-items: flex-start; border-radius: 10px; padding: 12px 16px; margin: 0 0 14px; border: 1px solid var(--line); }
-.banner .t { font-weight: 650; font-size: 15px; }
-.banner .d { font-size: 13px; margin-top: 2px; }
-.banner .go { margin-left: auto; white-space: nowrap; }
-.banner.ok { background: var(--ok-bg); } .banner.bad { background: var(--bad-bg); } .banner.warn { background: var(--warn-bg); }
-.banner.info { background: var(--info-bg); } .banner.idle { background: var(--soft); }
-.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
-.subtabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); padding: 8px 12px; }
-.subtabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
-time { cursor: help; }
-.who { display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
-label.inline { white-space: nowrap; }
-.who input { width: 150px; padding: 4px 8px; }
-.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
-.pager button { padding: 3px 10px; }
-.more { width: 100%; background: none; border-style: dashed; color: var(--muted); font-size: 12.5px; }
-.run { color: var(--muted); font-size: 12px; margin-top: 3px; }
-.run b { color: var(--ink); font-weight: 600; }
-#login { position: fixed; inset: 0; background: var(--bg); display: grid; place-items: center; z-index: 30; padding: 16px; }
-#login .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 26px 28px; width: min(420px, 100%); }
-#login h2 { margin: 0 0 4px; font-size: 20px; } #login p { color: var(--muted); font-size: 13px; }
-#login input { width: 100%; font-size: 15px; padding: 9px 10px; margin: 6px 0 14px; }
-#login button { width: 100%; padding: 9px; }
-.gl dt { font-weight: 600; margin-top: 8px; } .gl dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
-.col { background: var(--soft); border-radius: 10px; padding: 10px; min-height: 120px; }
-.col h4 { margin: 0 0 8px; font-size: 12.5px; display: flex; justify-content: space-between; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.col h4 b { color: var(--ink); font-size: 14px; }
-.pcard { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; font-size: 12.5px; }
-.pcard:hover { border-color: var(--accent); }
-.pcard .cid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
-.pcard .sub { color: var(--muted); margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+a { color: var(--brand); text-decoration: none; } a:hover { text-decoration: underline; }
+code, .mono { font-family: var(--mono); font-size: 12.5px; }
+h1, h2, h3, h4 { margin: 0; letter-spacing: -.01em; }
+svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -3px; }
+
+/* ---------- layout */
+.app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+.side { background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 14px; }
+.brand .logo { width: 32px; height: 32px; border-radius: 9px; background: var(--brand); color: var(--brand-ink); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+.brand b { display: block; font-size: 14.5px; } .brand span { color: var(--muted); font-size: 12px; }
+.side .new { margin: 4px 14px 12px; }
+.nav { display: flex; flex-direction: column; gap: 2px; padding: 0 10px; }
+.nav a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; color: var(--ink-2); font-weight: 500; }
+.nav a:hover { background: var(--sunken); text-decoration: none; }
+.nav a.on { background: var(--brand-soft); color: var(--brand); }
+.nav .count { margin-left: auto; background: var(--bad); color: #fff; border-radius: 10px; font-size: 11px; font-weight: 700; padding: 0 7px; line-height: 18px; }
+.side-foot { margin-top: auto; padding: 14px; border-top: 1px solid var(--line); display: grid; gap: 12px; font-size: 12.5px; color: var(--muted); }
+.side-foot .who { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; font-weight: 700; font-size: 12px; flex: none; }
+.side-foot .env { word-break: break-all; color: var(--ink-2); }
+main { min-width: 0; padding: 24px 32px 60px; }
+.page-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; margin-bottom: 20px; }
+.page-head h1 { font-size: 22px; font-weight: 700; }
+.page-head .sub { color: var(--muted); margin-top: 2px; }
+.page-head .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.crumbs { color: var(--muted); font-size: 13px; margin-bottom: 6px; } .crumbs a { color: var(--muted); }
+
+/* ---------- controls */
+.btn { font: inherit; font-weight: 600; font-size: 13.5px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 8px 14px; border-radius: 9px;
+  border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; box-shadow: var(--shadow); }
+.btn:hover { background: var(--sunken); text-decoration: none; }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
+.btn.primary:hover { filter: brightness(1.07); background: var(--brand); }
+.btn.danger { color: var(--bad); }
+.btn.ghost { background: none; border-color: transparent; box-shadow: none; color: var(--ink-2); }
+.btn.ghost:hover { background: var(--sunken); }
+.btn.sm { padding: 5px 10px; font-size: 12.5px; }
+.btn.lg { padding: 11px 20px; font-size: 15px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+input, select, textarea { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-2); border-radius: 9px; padding: 8px 11px; min-width: 0; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand-soft); border-color: var(--brand); }
+input:disabled { background: var(--sunken); color: var(--muted); }
+textarea { font-family: var(--mono); font-size: 12.5px; width: 100%; min-height: 300px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > span { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.field small { color: var(--muted); font-size: 12px; }
+.req { color: var(--bad); }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.seg { display: inline-flex; background: var(--sunken); border-radius: 10px; padding: 3px; gap: 2px; flex-wrap: wrap; }
+.seg button { border: 0; background: none; font: inherit; font-weight: 600; font-size: 13px; color: var(--muted); padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.switch { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.switch input { width: 36px; height: 20px; appearance: none; -webkit-appearance: none; border-radius: 20px; background: var(--line-2); position: relative; cursor: pointer; flex: none; padding: 0; border: 0; margin-top: 1px; }
+.switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .15s; }
+.switch input:checked { background: var(--brand); } .switch input:checked::after { left: 18px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
-.toolbar input { flex: 0 1 320px; }
-.totals { color: var(--muted); font-size: 12.5px; margin-left: auto; }
-tr.cb { cursor: pointer; } tr.cb:hover td { background: var(--soft); }
-a { color: var(--accent); }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
-header h1 { font-size: 17px; margin: 0; }
-header .env { order: 5; flex-basis: 100%; }
-header .env { color: var(--muted); font-size: 12px; font-family: var(--mono); display: flex; flex-wrap: wrap; gap: 4px 16px; }
-nav { margin-left: auto; display: flex; gap: 4px; }
-nav button { background: none; border: 1px solid transparent; color: var(--muted); }
-nav button.on { border-color: var(--line); color: var(--ink); background: var(--soft); }
-main { display: grid; grid-template-columns: 340px 1fr; min-height: calc(100vh - 58px); }
-aside { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width: 0; }
-aside .tools { padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--line); }
-aside .tools #q { flex: 1 1 100% !important; order: 3; }
-aside .tools select { flex: 1; }
-#list { overflow-y: auto; flex: 1; }
-.item { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
-.item:hover { background: var(--soft); }
-.item.sel { background: var(--info-bg); }
-.item .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-.item .cid { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 100%; }
-.item .top { flex-wrap: wrap; justify-content: flex-start; row-gap: 3px; }
-.item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
-section#detail { padding: 18px 22px 40px; min-width: 0; }
-.empty { color: var(--muted); padding: 40px; text-align: center; }
-button, .btn { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
-button.danger { color: var(--bad); }
-button:disabled { opacity: .45; cursor: not-allowed; }
-input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); min-width: 0; }
-textarea { font-family: var(--mono); font-size: 12.5px; width: 100%; min-height: 220px; }
-label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
-label.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; }
-.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
-.s-ok { color: var(--ok); background: var(--ok-bg); } .s-bad { color: var(--bad); background: var(--bad-bg); }
-.s-warn { color: var(--warn); background: var(--warn-bg); } .s-info { color: var(--info); background: var(--info-bg); }
-.s-idle { color: var(--idle); background: var(--idle-bg); }
-.head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 6px; }
-.head h2 { margin: 0; font-size: 18px; font-family: var(--mono); word-break: break-all; }
-.head .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
-.meta { display: flex; flex-wrap: wrap; gap: 4px 20px; color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
-.meta b { color: var(--ink); font-weight: 500; font-family: var(--mono); }
-.steps { display: flex; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
-.steps div { flex: 1; padding: 8px 6px; text-align: center; font-size: 12px; color: var(--muted); border-right: 1px solid var(--line); }
-.steps div:last-child { border-right: 0; }
-.steps .done { color: var(--ok); background: var(--ok-bg); }
-.steps .now { color: var(--info); background: var(--info-bg); font-weight: 700; }
-.steps .fail { color: var(--bad); background: var(--bad-bg); font-weight: 700; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
-.card h3 { margin: 0 0 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
-.card h3 .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--soft); font-size: 11px; color: var(--muted); }
-.card .hint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
-.card.wide { grid-column: 1 / -1; }
-.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }
-.row > label { flex: 1 1 140px; }
-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 5px 6px; }
-td { border-bottom: 1px solid var(--line); padding: 5px 6px; vertical-align: top; word-break: break-word; }
-td.mono, .mono { font-family: var(--mono); font-size: 12px; }
-.scroll { max-height: 320px; overflow: auto; }
-pre { background: var(--soft); padding: 10px; border-radius: 6px; font-size: 12px; overflow: auto; max-height: 360px; margin: 6px 0 0; }
-.drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 14px; text-align: center; color: var(--muted); margin: 10px 0; }
-.drop.over { border-color: var(--accent); color: var(--accent); }
-.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; }
-.kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
-.ev { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 175px 130px 1fr; gap: 10px; font-size: 12.5px; }
-.ev .t { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
-.ev details summary { cursor: pointer; }
-.errs li { color: var(--bad); margin-bottom: 4px; }
-.okline { color: var(--ok); }
-#toast { position: fixed; bottom: 16px; right: 16px; max-width: 480px; padding: 10px 14px; border-radius: 8px; background: var(--ink); color: var(--bg); display: none; z-index: 20; }
-dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); width: min(640px, calc(100vw - 32px)); padding: 18px 20px; }
-dialog::backdrop { background: rgba(0,0,0,.4); }
-dialog h3 { margin: 0 0 12px; }
-.report { margin-bottom: 14px; }
-@media (max-width: 900px) {
-  main { grid-template-columns: 1fr; }
-  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
-  .grid { grid-template-columns: 1fr; }
+.toolbar input[type=search] { width: 280px; }
+.spacer { flex: 1; }
+
+/* ---------- surfaces */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.card-h { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.card-h h3 { font-size: 15px; font-weight: 650; }
+.card-h .sub { color: var(--muted); font-size: 12.5px; }
+.card-h .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.card-b { padding: 16px 18px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 18px; }
+.stack { display: grid; gap: 18px; }
+.hint { color: var(--muted); font-size: 12.5px; }
+.empty { color: var(--muted); text-align: center; padding: 34px 16px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.nodot::before { display: none; }
+.t-ok { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-line); }
+.t-bad { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-line); }
+.t-warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-line); }
+.t-info { color: var(--info); background: var(--info-bg); border-color: var(--info-line); }
+.t-idle { color: var(--idle); background: var(--idle-bg); border-color: var(--idle-line); }
+.pill.big { font-size: 13.5px; padding: 5px 14px; }
+.tag { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 7px; border-radius: 5px; }
+.tag.eocr { color: var(--brand); background: var(--brand-soft); } .tag.ace { color: var(--ace); background: var(--ace-bg); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--sunken); white-space: nowrap; }
+td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; word-break: break-word; }
+tr:last-child td { border-bottom: 0; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--sunken); }
+.tbl { overflow-x: auto; }
+pre { background: var(--sunken); border: 1px solid var(--line); padding: 12px 14px; border-radius: 10px; font-size: 12px; overflow: auto; max-height: 460px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; margin: 0; }
+.kv dt { color: var(--muted); font-size: 12.5px; } .kv dd { margin: 0; word-break: break-word; }
+.errs { margin: 6px 0 0; padding-left: 18px; color: var(--bad); } .errs li { margin: 2px 0; }
+.okline { color: var(--ok); font-weight: 600; }
+
+/* ---------- dashboard */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.kpi { padding: 16px 18px; transition: border-color .15s; display: block; color: inherit; }
+.kpi:hover { border-color: var(--brand); text-decoration: none; }
+.kpi .v { font-size: 28px; font-weight: 750; line-height: 1.1; letter-spacing: -.02em; }
+.kpi .l { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.kpi.bad .v { color: var(--bad); } .kpi.ok .v { color: var(--ok); }
+.hero { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; padding: 22px 24px; margin-bottom: 18px; align-items: center; }
+.hero h2 { font-size: 19px; } .hero p { color: var(--muted); margin: 6px 0 16px; }
+.flow { display: grid; gap: 8px; counter-reset: s; }
+.flow div { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.flow div::before { counter-increment: s; content: counter(s); width: 22px; height: 22px; border-radius: 50%; background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 12px; display: grid; place-items: center; flex: none; }
+.row-item { display: flex; gap: 14px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.row-item:last-child { border-bottom: 0; }
+.row-item:hover { background: var(--sunken); }
+.row-item .main { min-width: 0; flex: 1; }
+.row-item .t1 { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row-item .t2 { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.mini { display: flex; gap: 3px; width: 110px; flex: none; }
+.mini span { height: 6px; flex: 1; border-radius: 3px; background: var(--line); }
+.mini span.d { background: var(--ok); } .mini span.c { background: var(--info); animation: pulse 1.4s infinite; } .mini span.f { background: var(--bad); } .mini span.w { background: var(--warn); }
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* ---------- job page */
+.job-head { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: center; margin-bottom: 6px; }
+.job-head h1 { font-size: 22px; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+.facts b { color: var(--ink); font-weight: 600; }
+.status-card { border-radius: var(--radius); border: 1px solid; padding: 18px 20px; margin-bottom: 18px; }
+.status-card.ok { background: var(--ok-bg); border-color: var(--ok-line); } .status-card.bad { background: var(--bad-bg); border-color: var(--bad-line); }
+.status-card.warn { background: var(--warn-bg); border-color: var(--warn-line); } .status-card.info { background: var(--info-bg); border-color: var(--info-line); }
+.status-card.idle { background: var(--idle-bg); border-color: var(--idle-line); }
+.sc-top { display: flex; gap: 14px; align-items: flex-start; }
+.sc-icon { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; flex: none; background: var(--surface); }
+.sc-icon svg.i { width: 20px; height: 20px; }
+.ok .sc-icon { color: var(--ok); } .bad .sc-icon { color: var(--bad); } .warn .sc-icon { color: var(--warn); } .info .sc-icon, .idle .sc-icon { color: var(--info); }
+.sc-text { min-width: 0; flex: 1; }
+.sc-title { font-size: 17px; font-weight: 700; }
+.sc-sub { margin-top: 3px; color: var(--ink-2); }
+.sc-where { margin-left: auto; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: var(--surface); padding: 3px 10px; border-radius: 8px; }
+.sc-body { margin-top: 14px; display: grid; gap: 14px; }
+.sc-body .tbl { background: var(--surface); border-radius: 10px; border: 1px solid var(--line); }
+.sc-next { margin: 4px 0 0; padding-left: 20px; } .sc-next li { margin: 3px 0; }
+.sc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.track { display: flex; overflow-x: auto; padding: 22px 18px 14px; }
+.st { flex: 1 1 0; position: relative; padding-top: 30px; text-align: center; min-width: 94px; }
+.st::before { content: ""; position: absolute; top: 11px; left: 0; right: 0; height: 2px; background: var(--line-2); }
+.st:first-child::before { left: 50%; } .st:last-child::before { right: 50%; }
+.st.done::before { background: var(--ok); }
+.st .dot { position: absolute; top: 2px; left: 50%; transform: translateX(-50%); width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line-2); background: var(--surface); display: grid; place-items: center; }
+.st.done .dot { background: var(--ok); border-color: var(--ok); color: #fff; }
+.st.failed .dot { background: var(--bad); border-color: var(--bad); color: #fff; }
+.st.current .dot { border-color: var(--info); box-shadow: 0 0 0 5px var(--info-bg); }
+.st.current .dot::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: pulse 1.2s infinite; }
+.st.waiting .dot { border-color: var(--warn); box-shadow: 0 0 0 5px var(--warn-bg); }
+.st.waiting .dot::after { content: "!"; color: var(--warn); font-weight: 800; font-size: 12px; }
+.st .dot svg.i { width: 12px; height: 12px; stroke-width: 3; }
+.st .lbl { font-weight: 600; font-size: 12.5px; padding: 0 4px; line-height: 1.3; }
+.st.upcoming .lbl { color: var(--muted); font-weight: 500; }
+.st.failed .lbl { color: var(--bad); } .st.current .lbl { color: var(--info); } .st.waiting .lbl { color: var(--warn); }
+.st .when { font-size: 11.5px; color: var(--muted); } .st .note { font-size: 11.5px; color: var(--muted); padding: 0 6px; word-break: break-word; }
+.st .sd { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; }
+.tabs a { padding: 10px 14px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+.tabs a:hover { color: var(--ink); text-decoration: none; }
+.tabs a.on { color: var(--brand); border-bottom-color: var(--brand); }
+.tabs .n { background: var(--bad); color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; margin-left: 5px; }
+.loc { display: flex; align-items: flex-start; gap: 8px; font-family: var(--mono); font-size: 12.5px; background: var(--sunken); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; word-break: break-all; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { background: var(--sunken); border-radius: 10px; padding: 12px 14px; }
+.stat .v { font-size: 20px; font-weight: 700; } .stat .l { color: var(--muted); font-size: 12px; }
+.ev { display: grid; grid-template-columns: 170px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.ev:last-child { border-bottom: 0; }
+.ev .t { color: var(--muted); font-size: 12px; display: grid; gap: 4px; justify-items: start; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+
+/* ---------- wizard */
+.wz-steps { display: flex; margin-bottom: 22px; overflow-x: auto; }
+.wz-steps button { flex: 1; min-width: 150px; display: flex; gap: 10px; align-items: center; border: 0; border-bottom: 3px solid var(--line); background: none; font: inherit; text-align: left;
+  padding: 10px 12px; cursor: pointer; color: var(--muted); }
+.wz-steps button .n { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12.5px; background: var(--sunken); flex: none; }
+.wz-steps button .n svg.i { width: 14px; height: 14px; stroke-width: 3; }
+.wz-steps button b { display: block; color: var(--ink-2); font-size: 13.5px; } .wz-steps button small { font-size: 12px; }
+.wz-steps button.done { border-bottom-color: var(--ok); } .wz-steps button.done .n { background: var(--ok); color: #fff; }
+.wz-steps button.on { border-bottom-color: var(--brand); } .wz-steps button.on .n { background: var(--brand); color: var(--brand-ink); } .wz-steps button.on b { color: var(--brand); }
+.wz-steps button:disabled { cursor: default; opacity: .55; }
+.wz { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.wz-foot { display: flex; gap: 10px; align-items: center; padding: 14px 18px; border-top: 1px solid var(--line); background: var(--sunken); border-radius: 0 0 var(--radius) var(--radius); }
+.wz-side { position: sticky; top: 20px; }
+.drop { border: 2px dashed var(--line-2); border-radius: 12px; padding: 28px; text-align: center; color: var(--muted); transition: all .15s; }
+.drop.over { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+.drop svg.i { width: 26px; height: 26px; display: block; margin: 0 auto 8px; }
+.drop b { color: var(--ink); display: block; font-size: 15px; margin-bottom: 4px; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 90px; }
+.bar i { display: block; height: 100%; background: var(--brand); transition: width .2s; }
+.checks { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.checks li { display: flex; gap: 8px; font-size: 13px; align-items: flex-start; }
+.checks .y { color: var(--ok); } .checks .n { color: var(--warn); }
+.json .k { color: var(--brand); } .json .s { color: var(--ok); }
+
+/* ---------- overlays */
+#toast { position: fixed; bottom: 20px; right: 20px; max-width: 460px; padding: 12px 16px; border-radius: 10px; background: var(--ink); color: var(--bg); display: none; z-index: 40; box-shadow: 0 8px 24px rgba(0,0,0,.2); font-weight: 500; }
+dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--ink); width: min(720px, calc(100vw - 32px)); padding: 0; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(15,17,21,.45); }
+dialog .d-h { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; } dialog .d-h h3 { font-size: 16px; }
+dialog .d-b { padding: 18px 20px; display: grid; gap: 14px; max-height: 70vh; overflow: auto; }
+dialog .d-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.gl { margin: 0; } .gl dt { font-weight: 650; margin-top: 10px; } .gl dd { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+#login { position: fixed; inset: 0; background: var(--bg); display: grid; place-items: center; z-index: 30; padding: 16px; }
+#login .box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 26px 28px; width: min(420px, 100%); box-shadow: var(--shadow); }
+#login h2 { margin: 0 0 4px; font-size: 20px; } #login p { color: var(--muted); font-size: 13px; }
+#login label { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+#login input { width: 100%; font-size: 15px; padding: 9px 10px; margin: 6px 0 14px; }
+#login button { width: 100%; padding: 10px; font: inherit; font-weight: 600; border-radius: 9px; border: 0; background: var(--brand); color: var(--brand-ink); cursor: pointer; }
+
+@media (max-width: 1100px) { .wz { grid-template-columns: 1fr; } .wz-side { position: static; } .hero { grid-template-columns: 1fr; } }
+@media (max-width: 820px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .side, .nav { min-width: 0; }
+  .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); }
+  .brand { padding: 12px 14px; } .side .new { margin: 0 14px 0 auto; }
+  .nav { flex-direction: row; overflow-x: auto; width: 100%; padding: 6px 10px; }
+  .side-foot { display: none; }
+  main { padding: 18px 16px 40px; }
+  .grid2 { grid-template-columns: 1fr; }
+  .toolbar input[type=search] { width: 100%; }
   .ev { grid-template-columns: 1fr; gap: 2px; }
-  .steps { flex-wrap: wrap; } .steps div { flex: 1 0 33%; }
+  .sc-top { flex-wrap: wrap; } .sc-text { flex: 1 1 calc(100% - 52px); } .sc-where { margin-left: 52px; order: 3; }
+  main { overflow-x: hidden; }
+  .page-head .actions { margin-left: 0; }
+  .seg { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+  .toolbar > * { max-width: 100%; }
+  .tbl table { min-width: 680px; } .tbl td { word-break: normal; }
+  .kv { grid-template-columns: 1fr; gap: 2px 0; } .kv dd { margin-bottom: 8px; }
+  .wz-steps button { min-width: 128px; }
 }
 </style>
 </head>
 <body>
-<header>
-  <h1>eOCR Simulator Console</h1>
-  <div class="env" id="env"></div>
-  <nav><button id="tab-pipe" class="on">Pipeline<span class="badge" id="bdg-pipe" hidden></span></button><button id="tab-exec">Executions</button>
-    <button id="tab-cb">Callbacks<span class="badge" id="bdg-cb" hidden></span></button><button id="tab-rep">Scenario reports</button></nav>
-  <span class="who">Signed in as <b id="me-name"></b><a href="#" id="logout">Sign out</a></span>
-  <button id="help" title="What the terms mean">?</button>
-</header>
-<main id="view-pipe"><section style="padding:18px 22px">
-  <div class="toolbar"><input id="p-q" type="search" placeholder="Search loanId, correlationId or aceJobId">
-    <select id="p-days"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="">All time</option></select>
-    <label class="inline"><input type="checkbox" id="p-mine"> only mine</label>
-    <button class="primary" id="p-new">+ New execution</button><span class="totals" id="p-totals"></span><button id="p-csv">Export CSV</button></div>
-  <div class="stats" id="stats"></div>
-  <div class="empties" id="empties"></div>
-  <div class="board" id="board"></div></section></main>
-<main id="view-cb" hidden><section style="padding:18px 22px">
-  <div class="toolbar"><select id="cb-filter"><option value="">All deliveries</option><option value="accepted">Accepted (200)</option><option value="refused">Refused</option>
-    <option value="errors">With contract errors</option><option value="unknown">Unknown aceJobId</option></select>
-    <input id="cb-q" type="search" placeholder="Filter by aceJobId or correlationId"><span class="totals" id="cb-totals"></span><button id="cb-csv">Export CSV</button></div>
-  <div class="card"><div id="cb-table"></div></div></section></main>
-<main id="view-exec" hidden>
-  <aside>
-    <div class="tools">
-      <button class="primary" id="new">+ New execution</button>
-      <input id="q" type="search" placeholder="Search" style="flex:1;min-width:0">
-      <select id="filter" aria-label="Filter by state" style="flex:0 0 auto">
-        <option value="">All states</option><option value="attention">Needs attention</option><option value="open">Open</option><option>DRAFT</option><option>STAGED</option>
-        <option>SUBMITTED</option><option>IN_PROGRESS</option><option>CLOSED</option><option>REJECTED</option>
-      </select>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><div class="logo">eO</div><div><b>eOCR Simulator</b><span>ACE integration test console</span></div></div>
+    <a class="btn primary new" href="#/new"><svg class="i"><use href="#i-plus"/></svg>New job</a>
+    <nav class="nav" id="nav">
+      <a href="#/" data-nav="home"><svg class="i"><use href="#i-home"/></svg>Dashboard</a>
+      <a href="#/jobs" data-nav="jobs"><svg class="i"><use href="#i-list"/></svg>Jobs<span class="count" id="n-attn" hidden title="jobs needing attention"></span></a>
+      <a href="#/callbacks" data-nav="callbacks"><svg class="i"><use href="#i-inbox"/></svg>Callbacks<span class="count" id="n-cb" hidden title="off-spec or unknown callbacks"></span></a>
+      <a href="#/reports" data-nav="reports"><svg class="i"><use href="#i-chart"/></svg>Scenario runs</a>
+      <a href="#" id="help"><svg class="i"><use href="#i-help"/></svg>How it works</a>
+    </nav>
+    <div class="side-foot">
+      <div><div style="font-weight:600">ACE endpoint</div><div class="env mono" id="env-ace"></div><a href="#" id="ace-change">Change default</a></div>
+      <div class="who"><div class="avatar" id="me-av">?</div><div style="min-width:0"><div id="me-name" style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <a href="#" id="logout">Sign out</a></div></div>
     </div>
-    <div id="list"></div>
   </aside>
-  <section id="detail"><div class="empty">Create an execution or pick one from the list.<br>Each execution is one eOCR run: <code>loanId=&lt;id&gt;/correlationId=&lt;execution&gt;/</code> in the intake bucket.</div></section>
-</main>
-<main id="view-rep" hidden><section id="reports" style="padding:18px 22px"></section></main>
+  <main id="main"></main>
+</div>
 
-<dialog id="dlg-new">
-  <h3>New eOCR execution</h3>
-  <div class="row">
-    <label>Loan ID *<input id="n-loan" required></label>
-    <label>correlationId (eOCR execution)<input id="n-cid" placeholder="generated if empty"></label>
-  </div>
-  <div class="row">
-    <label>Seller loan number<input id="n-seller"></label>
-    <label>Loan amount<input id="n-amount"></label>
-    <label>Borrower last name<input id="n-borrower"></label>
-  </div>
-  <div class="row">
-    <label>Control file name<input id="n-control" value="controlfile.json"></label>
-    <label class="inline"><input type="checkbox" id="n-extract" checked> extractionRequired</label>
-  </div>
-  <div class="row" style="justify-content: space-between">
-    <button id="n-fill" type="button">Fill from test loan</button>
-    <span><button id="n-cancel" type="button">Cancel</button> <button class="primary" id="n-create" type="button">Create</button></span>
-  </div>
-</dialog>
-
-<dialog id="dlg-close">
-  <h3>Close execution</h3>
-  <p class="hint" style="color:var(--muted)">eOCR closes an execution itself when ACE's callback arrives. Close by hand only when the callback never came:
-    the console asks the Status API first, and if the job is terminal it retrieves the result (reconciliation); otherwise it records the execution as abandoned.</p>
-  <label>Note<input id="c-note" placeholder="why it is being closed"></label>
-  <div class="row" style="justify-content:flex-end; margin-top: 12px"><button id="c-cancel">Cancel</button><button class="primary" id="c-ok">Close execution</button></div>
-</dialog>
-
-<dialog id="dlg-ace">
-  <h3>Default ACE endpoint</h3>
-  <p style="color:var(--muted);font-size:13px">Used for new submissions unless one is given on the submission itself. Saved in S3
-    (<span class="mono">eocr-sim/settings.json</span>). Each execution keeps the endpoint it was submitted to for its status polling, HITL and close.
-    Environment default (ACE_URL_INTEGRATION): <span class="mono" id="ace-env"></span></p>
-  <label>ACE integration base URL<input id="ace-url" placeholder="https://…"></label>
-  <div class="row" style="justify-content:space-between;margin-top:12px"><button id="ace-reset">Use environment default</button>
-    <span><button id="ace-cancel">Cancel</button> <button class="primary" id="ace-save">Save</button></span></div>
-</dialog>
-
-<dialog id="dlg-help">
-  <h3>How to read the console</h3>
-  <dl class="gl">
-    <dt>Execution</dt><dd>One eOCR run for one loan: its own folder <span class="mono">loanId=…/correlationId=…/</span> in the intake bucket. Identified by its <b>correlationId</b>.</dd>
-    <dt>ACE job (aceJobId)</dt><dd>The number ACE gives the execution when it accepts it. Every status and callback refers to it.</dd>
-    <dt>Control file</dt><dd>The JSON next to the documents that tells ACE the loan data, the document list and whether to extract fields.</dd>
-    <dt>ACE stage / state</dt><dd>Where ACE is (PRECHECK, CLASSIFICATION, EXTRACTION…) and what that step is doing (RUNNING, HITL_PENDING…), read from ACE's Status API.</dd>
-    <dt>HITL review</dt><dd>ACE paused for a person to confirm loan data it could not match. The console can act as that reviewer.</dd>
-    <dt>Callback</dt><dd>ACE calling eOCR back with the final outcome. ACE retries until eOCR answers 200.</dd>
-    <dt>Result file (batchPath)</dt><dd>The <span class="mono">*Response.json</span> ACE writes with the documents it found and the fields it extracted.</dd>
-    <dt>Outcomes</dt><dd>0 COMPLETED · 1000 PRECHECK_FAILED (bad or unreadable files) · 2000 VALIDATION_FAILED (loan data does not match the NOTE) · 3000 PROCESSING_FAILED (ACE error).</dd>
-    <dt>Spec compliance</dt><dd>Every ACE answer is checked against the integration specification; any deviation is listed on the execution.</dd>
-    <dt>Where the data comes from</dt><dd>Progress, outcome and result all come from ACE (Status API, callback, output bucket). The console only records them, in S3.</dd>
-  </dl>
-  <div class="row" style="justify-content:flex-end;margin-top:12px"><button id="help-close">Close</button></div>
-</dialog>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13L22 12v7H2v-7z"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18M7 15l4-4 3 3 5-6"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><path d="M22 11.1V12a10 10 0 1 1-5.9-9.1"/><path d="M22 4 12 14l-3-3"/></symbol>
+</svg>
 
 <div id="login" hidden><form class="box" id="login-form">
   <h2>eOCR Simulator Console</h2>
@@ -252,18 +323,65 @@ dialog h3 { margin: 0 0 12px; }
   <p id="login-note" style="margin:12px 0 0">This sign-in records who you are; it does not check a password. Use single sign-on (SIM_AUTH=oidc) for real authentication.</p>
 </form></div>
 
+<dialog id="dlg-close"><div class="d-h"><h3>Close this job</h3></div>
+  <div class="d-b"><p class="hint" style="margin:0">A job closes by itself when ACE calls back. Close it by hand only when the callback never comes: the console first asks ACE's
+    Status API; if ACE has finished it retrieves the result (reconciliation), otherwise the job is recorded as abandoned.</p>
+    <label class="field"><span>Reason</span><input id="c-note" placeholder="Why it is being closed"></label></div>
+  <div class="d-f"><button class="btn" id="c-cancel">Cancel</button><button class="btn primary" id="c-ok">Close job</button></div></dialog>
+
+<dialog id="dlg-ace"><div class="d-h"><h3>Default ACE endpoint</h3></div>
+  <div class="d-b"><p class="hint" style="margin:0">New jobs are sent here unless the submission names another endpoint. Each job keeps the endpoint it was
+    submitted to for its tracking, HITL review and close. Environment default: <span class="mono" id="ace-env"></span></p>
+    <label class="field"><span>ACE integration base URL</span><input id="ace-url" placeholder="https://…"></label></div>
+  <div class="d-f"><button class="btn ghost" id="ace-reset">Use environment default</button><span class="spacer"></span><button class="btn" id="ace-cancel">Cancel</button><button class="btn primary" id="ace-save">Save</button></div></dialog>
+
+<dialog id="dlg-view"><div class="d-h"><h3 id="v-title">File</h3><span class="spacer"></span><a class="btn sm" id="v-dl" href="#"><svg class="i"><use href="#i-download"/></svg>Download</a></div>
+  <div class="d-b"><pre id="v-body"></pre></div><div class="d-f"><button class="btn" id="v-close">Close</button></div></dialog>
+
+<dialog id="dlg-hitl"><div class="d-h"><h3>HITL review</h3></div>
+  <div class="d-b"><p class="hint" style="margin:0">ACE paused because it could not confirm some loan data against the NOTE. Acting as the ACE reviewer, mark each field as
+    matching or not, then send the decision. (This step belongs to ACE, not eOCR; the console lets you finish the test.)</p><div id="hitl-body"></div></div>
+  <div class="d-f"><button class="btn" id="hitl-cancel">Cancel</button><button class="btn primary" id="hitl-send">Send decision</button></div></dialog>
+
+<dialog id="dlg-help"><div class="d-h"><h3>How the eOCR simulator works</h3></div>
+  <div class="d-b">
+    <p style="margin:0">The console plays <b>eOCR</b> in the ACE to eOCR integration (spec v1.1). A <b>job</b> is one eOCR execution for one loan.</p>
+    <div class="flow"><div>Enter the loan details (they go into the control file)</div><div>Add the documents: they upload into the job's S3 folder</div>
+      <div>Review the control file, generated from your loan details and documents</div><div>Check the S3 folder and submit the job to ACE</div>
+      <div>Follow ACE's stages; the job closes when ACE calls back, and the result is checked</div></div>
+    <dl class="gl">
+      <dt>Job (correlationId)</dt><dd>One eOCR run, stored under <span class="mono">loanId=…/correlationId=…/</span> in the intake bucket.</dd>
+      <dt>ACE job (aceJobId)</dt><dd>The number ACE gives the job when it accepts it. Every status and callback refers to it.</dd>
+      <dt>Control file</dt><dd>JSON next to the documents: the loan data, the document list and whether ACE should extract fields.</dd>
+      <dt>Stages</dt><dd>eOCR steps (blue) and the stages ACE reports through its Status API (purple): pre-check, classification, extraction, validation…</dd>
+      <dt>HITL review</dt><dd>ACE paused for a person to confirm loan data it could not match on the NOTE.</dd>
+      <dt>Callback</dt><dd>ACE calling eOCR back with the final outcome; the job closes on it.</dd>
+      <dt>Outcomes</dt><dd>0 Completed · 1000 Pre-check failed (bad or unreadable files) · 2000 Validation failed (loan data ≠ NOTE) · 3000 Processing failed (ACE error).</dd>
+      <dt>Where the data comes from</dt><dd>Everything about progress and results comes from ACE (Status API, callback, output bucket). The console records and checks it.</dd>
+    </dl></div>
+  <div class="d-f"><button class="btn primary" id="help-close">Got it</button></div></dialog>
+
 <div id="toast"></div>
 
 <script>
 "use strict";
-const $ = (s, el = document) => el.querySelector(s);
-const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
-const fmt = n => (n ?? 0).toLocaleString();
-const J = v => esc(JSON.stringify(v, null, 2));
-let current = null, selected = null, controlDirty = false, rawMode = false, cfg = {};
-
-// The console may be served under a path prefix (e.g. /eocr-sim behind CloudFront); the server says which.
 const BASE = (document.querySelector('meta[name="eocr-base"]') || {}).content || "";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const bytes = n => n == null ? "—" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const icon = name => `<svg class="i"><use href="#i-${name}"/></svg>`;
+const DTF = new Intl.DateTimeFormat(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const TIME = new Intl.DateTimeFormat(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const DTFY = new Intl.DateTimeFormat(undefined, {year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+const when = (iso, long) => { if (!iso) return "—"; const d = new Date(iso); if (isNaN(d)) return esc(iso);
+  return `<time datetime="${esc(iso)}" title="${esc(d.toISOString().replace(".000", ""))} UTC">${esc((long ? DTFY : DTF).format(d))}</time>`; };
+const ago = iso => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000;
+  return s < 60 ? "just now" : s < 3600 ? `${s / 60 | 0} min ago` : s < 86400 ? `${s / 3600 | 0} h ago` : `${s / 86400 | 0} d ago`; };
+const dur = sec => sec == null ? "" : sec < 60 ? `${Math.round(sec)}s` : sec < 3600 ? `${Math.round(sec / 60)} min` : sec < 172800 ? `${(sec / 3600).toFixed(1)} h` : `${(sec / 86400).toFixed(1)} d`;
+const pill = (text, tone, cls = "") => `<span class="pill t-${tone} ${cls}">${esc(text)}</span>`;
+let cfg = {}, user = null, authMode = "name", timer = null;
+
 async function api(method, path, body, raw) {
   const opt = {method, headers: {}, credentials: "same-origin"};
   if (raw) { opt.body = raw; opt.headers["Content-Type"] = raw.type || "application/octet-stream"; }
@@ -273,6 +391,19 @@ async function api(method, path, body, raw) {
   if (r.status === 401) { showLogin(data.mode); throw new Error("Please sign in"); }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
+}
+function upload(path, file, onProgress) {  // XHR rather than fetch, for an upload progress bar
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("PUT", BASE + path); x.withCredentials = true;
+    x.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    x.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
+    x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch (e) { /* not JSON */ }
+      if (x.status === 401) { showLogin(d.mode); return reject(new Error("Please sign in")); }
+      x.status < 300 ? resolve(d) : reject(new Error(d.error || `HTTP ${x.status}`)); };
+    x.onerror = () => reject(new Error("upload failed (network)"));
+    x.send(file);
+  });
 }
 function toast(msg, bad) {
   const t = $("#toast"); t.textContent = msg; t.style.background = bad ? "var(--bad)" : "var(--ink)"; t.style.display = "block";
@@ -284,572 +415,651 @@ async function act(btn, fn, okMsg) {
   catch (e) { toast(e.message, true); }
   finally { if (btn) btn.disabled = false; }
 }
+const objUrl = (cid, area, name, inline) => `${BASE}/api/batches/${encodeURIComponent(cid)}/object?area=${area}&name=${encodeURIComponent(name)}${inline ? "&inline=1" : ""}`;
+function setCount(sel, n) { const el = $(sel); el.textContent = n; el.hidden = !n; }
+function bindCopy() { $$("[data-copy]").forEach(x => x.onclick = () => navigator.clipboard.writeText(x.dataset.copy).then(() => toast("Copied"), () => toast("Copy failed", true))); }
 
-const STATE_CLASS = {DRAFT: "s-idle", STAGED: "s-info", SUBMITTED: "s-info", IN_PROGRESS: "s-warn", CALLBACK_RECEIVED: "s-warn", CLOSED: "s-ok", REJECTED: "s-bad"};
-const CODE_CLASS = c => c === 0 ? "s-ok" : [1000, 2000, 3000, 4040].includes(c) ? "s-bad" : c === 4000 || c === 202 ? "s-warn" : "s-idle";
-const chip = (text, cls) => `<span class="chip ${cls}">${esc(text)}</span>`;
-const stateChip = b => {
-  if (b.state === "CLOSED" && b.outcome) {
-    if (![0, 1000, 2000, 3000, null].includes(b.outcome.code) && b.outcome.value !== "ABANDONED") return chip("CLOSED · INVALID CALLBACK", "s-bad");
-    const n = errCount(b);
-    if (b.outcome.code === 0 && n) return chip(`CLOSED · COMPLETED · ${n} issue${n > 1 ? "s" : ""}`, "s-warn");
-    return chip(`CLOSED · ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad");
-  }
-  return chip(b.state, STATE_CLASS[b.state] || "s-idle");
-};
-const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
-               set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } }};
-let user = null, authMode = "name";
-const me = () => user || "";
-const byWho = n => n ? esc(n) : `<span title="recorded before sign-in was required">unknown</span>`;
-const runLine = b => b.submittedAt
-  ? `Submitted <b>${when(b.submittedAt)}</b> by <b>${byWho(b.submittedBy)}</b>${b.closedAt ? ` · finished in <b>${dur(Date.parse(b.closedAt) - Date.parse(b.submittedAt))}</b>`
-      : b.state !== "REJECTED" ? ` · running ${dur(Date.now() - Date.parse(b.submittedAt))}` : ""}`
-  : `Created <b>${when(b.createdAt)}</b> by <b>${byWho(b.createdBy)}</b> · not submitted`;
-const DTF = new Intl.DateTimeFormat(undefined, {year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"});
-const when = iso => { if (!iso) return "—"; const d = new Date(iso); if (isNaN(d)) return esc(iso);
-  return `<time datetime="${esc(iso)}" title="${esc(d.toISOString().replace(".000", ""))} UTC">${esc(DTF.format(d))}</time>`; };
-const dur = ms => { const m = ms / 60000; return m < 1 ? `${Math.round(ms / 1000)}s` : m < 120 ? `${Math.round(m)} min` : m < 2880 ? `${(m / 60).toFixed(1)} h` : `${(m / 1440).toFixed(1)} days`; };
-const ago = iso => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000;
-  return s < 60 ? `${Math.max(0, s | 0)}s ago` : s < 3600 ? `${s / 60 | 0}m ago` : s < 86400 ? `${s / 3600 | 0}h ago` : `${s / 86400 | 0}d ago`; };
-
-// ---------------------------------------------------------------- list
-let listOffset = 0;
-const PAGE = 50;
-async function loadList() {
-  let page;
-  try { page = await api("GET", `/api/batches?q=${encodeURIComponent($("#q").value)}&state=${$("#filter").value}&offset=${listOffset}&limit=${PAGE}`); }
-  catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  if (!page.items.length && listOffset) { listOffset = Math.max(0, listOffset - PAGE); return loadList(); }
-  const items = page.items;
-  $("#list").innerHTML = (items.length ? items.map(b => `
-    <div class="item ${b.correlationId === selected ? "sel" : ""}" data-cid="${esc(b.correlationId)}">
-      <div class="top"><span class="cid">${esc(b.correlationId)}</span>${stateChip(b)}</div>
-      <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}
-        ${b.workflow && b.workflow.stage && b.state !== "CLOSED" ? `<span>${esc(b.workflow.stage)} · ${esc(b.workflow.state)}</span>` : ""}</div>
-      <div class="run">${runLine(b)}</div>
-    </div>`).join("") : `<div class="empty">No executions match.</div>`)
-    + (page.total > PAGE ? `<div class="pager"><span>${page.offset + 1}–${page.offset + items.length} of ${page.total}</span>
-      <span><button data-page="-1" ${page.offset ? "" : "disabled"}>‹ Prev</button> <button data-page="1" ${page.offset + items.length < page.total ? "" : "disabled"}>Next ›</button></span></div>` : "");
-}
-$("#list").addEventListener("click", e => {
-  const pg = e.target.closest("[data-page]"); if (pg) { listOffset = Math.max(0, listOffset + PAGE * +pg.dataset.page); return loadList(); }
-  const it = e.target.closest(".item"); if (it) select(it.dataset.cid); });
-$("#filter").addEventListener("change", () => { listOffset = 0; loadList(); });
-$("#q").addEventListener("input", () => { clearTimeout(loadList.h); loadList.h = setTimeout(() => { listOffset = 0; loadList(); }, 300); });
-
-async function select(cid) {
-  if (cid !== selected) { controlDirty = false; rawMode = false; }
-  selected = cid; history.replaceState(null, "", "#" + encodeURIComponent(cid));
-  document.querySelectorAll(".item").forEach(i => i.classList.toggle("sel", i.dataset.cid === cid));
-  await loadDetail(true);
-}
-
-// ---------------------------------------------------------------- detail
-async function loadDetail(force) {
-  if (!selected) return;
-  let b;
-  try { b = await api("GET", "/api/batches/" + encodeURIComponent(selected)); }
-  catch (e) { $("#detail").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  const changed = !current || current.correlationId !== b.correlationId || current.updatedAt !== b.updatedAt || (current.callbacks || []).length !== b.callbacks.length;
-  current = b;
-  if (force || changed) render(b);
-}
-
-function steps(b) {
-  const names = ["Created", "Documents", "Control file", "Onboarded", "Processing", "Callback", "Closed"];
-  const reached = {DRAFT: b.documents.length ? 1 : 0, STAGED: 2, REJECTED: 3, SUBMITTED: 3, IN_PROGRESS: 4, CALLBACK_RECEIVED: 5, CLOSED: 6}[b.state] ?? 0;
-  return `<div class="steps">${names.map((n, i) => {
-    let cls = i < reached ? "done" : i === reached ? "now" : "";
-    if (b.state === "REJECTED" && i === 3) cls = "fail";
-    if (b.state === "CLOSED" && i === 6) cls = b.outcome && b.outcome.code === 0 ? "done" : "fail";
-    if (b.state === "CLOSED" && i === 5 && !b.callback) cls = "fail";
-    return `<div class="${cls}">${n}</div>`; }).join("")}</div>`;
-}
-
+// ================================================================== status vocabulary (one place)
+const OPEN = b => ["SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED"].includes(b.state);
+const wfOf = b => b.workflow || (b.status && b.status.workflow) || {};
+const issuesOf = b => typeof b.contractErrors === "number" ? b.contractErrors + (b.validationFindings || 0)
+  : new Set([...(b.contractErrors || []), ...((b.callback || {}).contractErrors || []), ...((b.result || {}).errors || []), ...((b.validation || {}).findings || [])]).size;
 const STALE_H = 24;
-const OPEN = b => !["CLOSED", "REJECTED", "DRAFT", "STAGED"].includes(b.state);
-const errCount = b => typeof b.contractErrors === "number" ? b.contractErrors + (b.validationFindings || 0)
-  : new Set([...(b.contractErrors || []), ...((b.callback || {}).contractErrors || []), ...((b.result || {}).errors || []),
-             ...((b.validation || {}).findings || [])]).size;
-const isHitl = b => OPEN(b) && (((b.status || {}).workflow || b.workflow || {}).state === "HITL_PENDING");
-const isStale = b => OPEN(b) && Date.now() - Date.parse(b.updatedAt) > STALE_H * 3600e3;
-const needsAttention = b => (OPEN(b) && b.callbackOverdue) || isHitl(b) || isStale(b) || b.state === "REJECTED" || errCount(b) > 0;
-
-function statusBanner(b) {
-  const st = ((b.status || {}).status) || {}, wf = ((b.status || {}).workflow) || {}, last = (b.stages || []).slice(-1)[0];
-  const since = last ? ` since ${when(last.at)} (${ago(last.at)})` : "";
-  let tone = "info", t, d = "", go = null;
-  if (b.state === "DRAFT") [tone, t, d, go] = b.documents.length ? ["idle", "Next: write the control file", `${b.documents.length} document(s) uploaded. Check the loan data and write the control file.`, "pkg"]
-    : ["idle", "Next: add documents", "Upload the loan package files, or add test documents.", "pkg"];
-  else if (b.state === "STAGED") [tone, t, d, go] = ["info", "Ready to submit to ACE", "The control file is in S3. Submit it to ACE's onboarding API.", "pkg"];
-  else if (b.state === "REJECTED") { const ev = (b.events || []).filter(e => e.type === "rejected").pop();
-    [tone, t, d, go] = ["bad", "ACE refused the submission", `${esc(ev ? ev.message : "")}. Fix the package and submit again.`, "pkg"]; }
-  else if (b.state === "CLOSED") {
-    const o = b.outcome || {}, sm = (b.result || {}).summary;
-    const aceSays = ((b.status || {}).status) || {};
-    if (![0, 1000, 2000, 3000, null].includes(o.code) && o.value !== "ABANDONED") [tone, t, d] = ["bad", "ACE sent an invalid callback",
-      `Its status was code ${esc(JSON.stringify(o.code))} / value ${esc(JSON.stringify(o.value))}, which the spec does not allow.${aceSays.value ? ` ACE's Status API says ${esc(aceSays.code)} ${esc(aceSays.value)}.` : ""}`];
-    else if (o.code === 0 && (errCount(b) || (b.result && b.result.ok === false))) [tone, t, d] = ["warn", "Completed, with problems", `${esc(o.description)} ACE reported success, but the result has problems (see Validation and Spec compliance).`];
-    else if (o.code === 0) [tone, t, d] = ["ok", "Completed", `${esc(o.description)}${sm ? ` Result: ${sm.documents} documents in ${sm.documentTypes} types, ${sm.extractedFields} extracted fields.` : ""}`];
-    else if (o.value === "ABANDONED") [tone, t, d] = ["warn", "Closed by hand before ACE finished", esc(o.description)];
-    else [tone, t, d] = ["bad", `Failed: ${o.value}`, `${esc(o.description)}${(o.failedDocuments || []).length ? " — " + o.failedDocuments.map(f => `${esc(f.documentName)} (${esc(f.reason)})`).join(", ") : ""}`];
-    d += ` <span style="color:var(--muted)">Closed ${when(b.closedAt)} ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " · " + esc(b.closedByUser) : ""}${
-      b.submittedAt && b.closedAt ? ` · ${dur(Date.parse(b.closedAt) - Date.parse(b.submittedAt))} after submission` : ""}.</span>`;
+function statusOf(b) {
+  const o = b.outcome || {}, n = issuesOf(b);
+  switch (b.state) {
+    case "DRAFT": return {label: "Draft", tone: "idle"};
+    case "STAGED": return {label: "Ready to submit", tone: "info"};
+    case "REJECTED": return {label: "Refused by ACE", tone: "bad"};
+    case "CALLBACK_RECEIVED": return {label: "Finishing", tone: "info"};
+    case "CLOSED":
+      if (o.value === "ABANDONED") return {label: "Closed by hand", tone: "warn"};
+      if (![0, 1000, 2000, 3000].includes(o.code)) return {label: "Invalid callback", tone: "bad"};
+      if (o.code === 0) return n ? {label: `Completed · ${n} issue${n > 1 ? "s" : ""}`, tone: "warn"} : {label: "Completed", tone: "ok"};
+      return {label: {1000: "Pre-check failed", 2000: "Validation failed", 3000: "Processing failed"}[o.code], tone: "bad"};
+    default:
+      if (wfOf(b).state === "HITL_PENDING") return {label: "Needs HITL review", tone: "warn"};
+      if (b.callbackOverdue) return {label: "No callback", tone: "bad"};
+      return {label: "In progress", tone: "info"};
   }
-  else if (b.state === "CALLBACK_RECEIVED") [tone, t, d] = ["info", "Callback received", "Retrieving and checking the result file…"];
-  else if (wf.state === "HITL_PENDING") [tone, t, d, go] = ["warn", "Action needed: HITL review", `ACE is waiting for a person to confirm loan data${since}.`, "hitl"];
-  else if ([0, 1000, 2000, 3000].includes(st.code)) [tone, t, d] = b.callbackOverdue
-    ? ["bad", "ACE finished but has not called back", `ACE reports ${esc(st.value)}${since}. If the callback never comes, use Close… to close from the Status API.`]
-    : ["info", `ACE finished (${esc(st.value)}) — waiting for its callback`, `Reported${since}.`];
-  else [tone, t, d] = [isStale(b) ? "warn" : "info", isStale(b) ? `No progress for over ${STALE_H} hours` : "ACE is processing",
-    `ACE stage <b>${esc(wf.stage || "queued")}</b> ${esc(wf.state || "")}${since}. Submitted ${when(b.submittedAt)}${b.submittedBy ? " by " + esc(b.submittedBy) : ""}; checked every ${esc(cfg.trackIntervalSeconds)}s.`];
-  const errs = errCount(b);
-  if (errs) d += ` <b style="color:var(--bad)">${errs} problem(s) — see Validation and Spec compliance.</b>`;
-  return `<div class="banner ${tone}"><div><div class="t">${t}</div><div class="d">${d}</div></div>${go ? `<button class="primary go" data-goto="${go}">${
-    go === "hitl" ? "Open review" : "Open package"}</button>` : ""}</div>`;
 }
+function attentionReasons(b) {
+  const r = [];
+  if (OPEN(b) && wfOf(b).state === "HITL_PENDING") r.push("waiting for a HITL review");
+  if (OPEN(b) && b.callbackOverdue) r.push("ACE finished but never called back");
+  if (OPEN(b) && Date.now() - Date.parse(b.updatedAt) > STALE_H * 3600e3) r.push(`no progress for ${STALE_H} h+`);
+  if (b.state === "REJECTED") r.push("ACE refused the submission");
+  const n = issuesOf(b); if (n) r.push(`${n} spec / validation issue${n > 1 ? "s" : ""}`);
+  return r;
+}
+function mini(b) {  // Prepared · Submitted · ACE processing · Callback · Closed
+  const s = b.state, o = b.outcome || {}, terminal = [0, 1000, 2000, 3000].includes((b.status || {}).code);
+  const cls = ["", "", "", "", ""], fill = n => { for (let i = 0; i < n; i++) cls[i] = "d"; };
+  if (s === "DRAFT") cls[0] = "c";
+  else if (s === "STAGED") { fill(1); cls[1] = "c"; }
+  else if (s === "REJECTED") { fill(1); cls[1] = "f"; }
+  else if (OPEN(b)) { fill(terminal ? 3 : 2); cls[terminal ? 3 : 2] = wfOf(b).state === "HITL_PENDING" ? "w" : b.callbackOverdue ? "f" : "c"; }
+  else if (s === "CLOSED") { fill(5); if (o.code !== 0) cls[4] = o.value === "ABANDONED" ? "w" : "f"; else if (issuesOf(b)) cls[4] = "w"; }
+  return `<div class="mini" title="Prepared · Submitted · ACE processing · Callback · Closed">${cls.map(c => `<span class="${c}"></span>`).join("")}</div>`;
+}
+const whoLine = b => b.submittedAt ? `Submitted ${when(b.submittedAt)} by ${esc(b.submittedBy || "unknown")}` : `Created ${when(b.createdAt)} by ${esc(b.createdBy || "unknown")} · not submitted`;
+const took = b => b.submittedAt ? dur(((b.closedAt ? Date.parse(b.closedAt) : Date.now()) - Date.parse(b.submittedAt)) / 1000) : "";
 
-let views = {};
-function render(b) {
-  const editable = ["DRAFT", "STAGED", "REJECTED"].includes(b.state);
-  const keepControl = controlDirty && $("#control-card");
-  const savedControl = keepControl ? $("#control-card") : null;  // keep the operator's unsaved edits
-  const st = (b.status || {}).status || {}, wf = (b.status || {}).workflow || {};
-  const view = views[b.correlationId] || (editable ? "pkg" : "track");
-  $("#detail").innerHTML = `
-    <div class="head"><h2>${esc(b.correlationId)}</h2>${stateChip(b)}
-      <div class="actions">
-        <button id="a-refresh" ${b.aceJobId ? "" : "disabled"} title="Ask ACE's Status API now">Check status now</button>
-        <button id="a-resubmit" ${b.documents.length ? "" : "disabled"} title="Same documents and loan data, new correlationId">Resubmit as new execution</button>
-        <button class="danger" id="a-close" ${b.state === "CLOSED" ? "disabled" : ""}>Close…</button>
-      </div></div>
-    <div class="run" style="font-size:13px;margin:-2px 0 8px">${runLine(b)}${b.closedAt ? ` · closed ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " (" + esc(b.closedByUser) + ")" : ""}` : ""}</div>
-    <div class="meta"><span>Loan <b>${esc(b.loanId)}</b></span><span>ACE job <b>${esc(b.aceJobId || "not submitted")}</b></span>
-      <span>Created ${when(b.createdAt)}${b.createdBy ? ` by <b>${esc(b.createdBy)}</b>` : ""}</span>
-      ${b.submittedAt ? `<span>Submitted ${when(b.submittedAt)}${b.submittedBy ? ` by <b>${esc(b.submittedBy)}</b>` : ""}</span>` : ""}
-      <span>Source <b>${esc(b.source)}</b></span>
-      ${b.resubmissionOf ? `<span>Resubmission of <a href="#${esc(b.resubmissionOf)}" data-open="${esc(b.resubmissionOf)}">${esc(b.resubmissionOf)}</a></span>` : ""}
-      ${b.aceUrl ? `<span>ACE <b>${esc(b.aceUrl)}</b></span>` : ""}<span>Files <b>${esc(b.s3.intake)}</b></span></div>
-    ${statusBanner(b)}
-    ${steps(b)}
-    <div class="subtabs"><button data-view="track" class="${view === "track" ? "on" : ""}">Tracking</button>
-      <button data-view="pkg" class="${view === "pkg" ? "on" : ""}">Package &amp; submission</button></div>
-    <div class="grid" id="pane-track" ${view === "track" ? "" : "hidden"}>
-      ${trackCard(b, st, wf)}
-      ${callbackCard(b)}
-      ${resultCard(b)}
-      ${validationCard(b)}
-      ${checksCard(b)}
-      ${recordsCard(b)}
-      ${timelineCard(b)}
+// ================================================================== router
+const NAV = {"": "home", jobs: "jobs", job: "jobs", callbacks: "callbacks", reports: "reports"};
+async function route() {
+  clearInterval(timer); timer = null;
+  if (location.hash.length > 1 && !location.hash.startsWith("#/")) { location.replace("#/job/" + location.hash.slice(1)); return; }  // old links
+  const path = location.hash.replace(/^#\/?/, "").split("?")[0];
+  const p = path.split("/").map(decodeURIComponent);
+  $$("#nav a[data-nav]").forEach(a => a.classList.toggle("on", a.dataset.nav === NAV[p[0] || ""]));
+  window.scrollTo(0, 0);
+  if (!p[0]) return pageHome();
+  if (p[0] === "jobs") return pageJobs();
+  if (p[0] === "new") return pageWizard(null);
+  if (p[0] === "job" && p[1]) return p[2] === "setup" ? pageWizard(p[1]) : pageJob(p[1], p[2] || "overview");
+  if (p[0] === "callbacks") return pageCallbacks();
+  if (p[0] === "reports") return pageReports();
+  return pageHome();
+}
+window.addEventListener("hashchange", route);
+const main = () => $("#main");
+function every(ms, fn) { clearInterval(timer); timer = setInterval(() => { if (!document.hidden && !$("dialog[open]")) fn(); }, ms); }
+
+// ================================================================== dashboard
+let homeDays = "7";
+async function pageHome() {
+  main().innerHTML = `<div class="page-head"><div><h1>Dashboard</h1><div class="sub">eOCR jobs sent to ACE, and what needs you</div></div>
+    <div class="actions"><select id="h-days"><option value="1">Last 24 hours</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="">All time</option></select>
+    <a class="btn primary" href="#/new">${icon("plus")}New job</a></div></div><div id="h-body"><div class="empty">Loading…</div></div>`;
+  $("#h-days").value = homeDays; $("#h-days").onchange = e => { homeDays = e.target.value; drawHome(); };
+  await drawHome(); every(15000, drawHome);
+}
+async function drawHome() {
+  let items; try { items = (await api("GET", `/api/batches?days=${homeDays}&limit=all`)).items; } catch (e) { $("#h-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const day = Date.now() - 86400e3, closed = items.filter(b => b.state === "CLOSED" || b.state === "REJECTED");
+  const ok = closed.filter(b => statusOf(b).tone === "ok"), failed = closed.filter(b => statusOf(b).tone === "bad");
+  const running = items.filter(OPEN), setup = items.filter(b => ["DRAFT", "STAGED"].includes(b.state)), attn = items.filter(b => attentionReasons(b).length);
+  const timed = items.filter(b => b.submittedAt && b.callbackAt).map(b => (Date.parse(b.callbackAt) - Date.parse(b.submittedAt)) / 1000);
+  const kpi = (v, l, go, tone = "") => `<a class="card kpi ${tone}" href="${go}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></a>`;
+  const list = (rows, empty, extra) => rows.length ? rows.map(b => `<div class="row-item" data-go="${esc(b.correlationId)}">${mini(b)}
+      <div class="main"><div class="t1">Loan ${esc(b.loanId)} ${pill(statusOf(b).label, statusOf(b).tone)}</div>
+      <div class="t2">${extra(b)}</div></div>${icon("arrow")}</div>`).join("") : `<div class="empty">${empty}</div>`;
+  $("#h-body").innerHTML = `
+    ${items.length ? "" : `<div class="card hero"><div><h2>Send your first job to ACE</h2><p>A job is one eOCR execution for one loan: you prepare the package,
+      the console stages it in S3 and calls ACE, then follows ACE until it calls back.</p><a class="btn primary lg" href="#/new">${icon("plus")}Start a new job</a></div>
+      <div class="flow"><div>Loan details</div><div>Documents into the S3 folder</div><div>Control file, generated for you</div><div>Check the folder, submit to ACE</div><div>Follow the stages, get the result</div></div></div>`}
+    <div class="kpis">
+      ${kpi(items.filter(b => b.submittedAt && Date.parse(b.submittedAt) > day).length, "submitted in the last 24 h", "#/jobs")}
+      ${kpi(running.length, "in progress in ACE", "#/jobs?f=running")}
+      ${kpi(ok.length, `completed${closed.length ? ` · ${Math.round(100 * ok.length / closed.length)}% of finished` : ""}`, "#/jobs?f=ok", "ok")}
+      ${kpi(failed.length, "failed or refused", "#/jobs?f=failed", failed.length ? "bad" : "")}
+      ${kpi(timed.length ? dur(timed.reduce((a, x) => a + x, 0) / timed.length) : "—", "average time to ACE's callback", "#/jobs")}
+      ${kpi(attn.length, "need your attention", "#/jobs?f=attention", attn.length ? "bad" : "")}
     </div>
-    <div class="grid" id="pane-pkg" ${view === "pkg" ? "" : "hidden"}>
-      ${docsCard(b, editable)}
-      <div class="card" id="control-card"></div>
-      ${submitCard(b)}
-    </div>`;
-  if (savedControl) $("#control-card").replaceWith(savedControl); else renderControl(b, editable);
-  wire(b);
-}
-
-function docsCard(b, editable) {
-  return `<div class="card"><h3><span class="n">1</span>Documents</h3>
-    <p class="hint">Uploaded straight into <span class="mono">${esc(b.s3.intake)}</span>, the way eOCR stages a package.</p>
-    ${b.documents.length ? `<div class="scroll"><table><tr><th>fileName</th><th>contentType</th><th>bytes</th><th>origin</th><th></th></tr>
-      ${b.documents.map(d => `<tr><td class="mono">${esc(d.fileName)}</td><td>${esc(d.contentType)}</td><td>${fmt(d.bytes)}</td><td>${esc(d.origin || "")}</td>
-        <td>${editable ? `<button class="danger" data-rm="${esc(d.fileName)}" title="Remove">✕</button>` : ""}</td></tr>`).join("")}</table></div>`
-      : `<p class="hint">No documents yet.</p>`}
-    ${editable ? `<div class="drop" id="drop">Drop files here or <label style="display:inline;color:var(--accent);cursor:pointer">browse<input type="file" id="files" multiple hidden></label></div>
-      <div class="row"><label style="flex:0 0 110px">Test pages<input type="number" id="t-pages" value="40" min="1"></label>
-        <button data-test="package">+ Test package (NOTE pages)</button><button data-test="locked">+ Password-protected PDF</button><button data-test="corrupt">+ Corrupt PDF</button></div>`
-      : `<p class="hint">The package is fixed once submitted.</p>`}
-  </div>`;
-}
-
-function renderControl(b, editable) {
-  const li = b.loanInfo || {};
-  const extra = Object.keys(li).filter(k => !["sellerLoanNumber", "loanAmount", "borrowerLastName"].includes(k));
-  $("#control-card").innerHTML = `<h3><span class="n">2</span>Control file <span class="mono" style="font-weight:400;color:var(--muted)">${esc(b.controlFileName)}</span>
-      ${b.controlOverride ? chip("hand-edited", "s-warn") : ""}</h3>
-    <p class="hint">Spec 3.2. The documents list follows the uploaded files. Written to S3 only when you press “Write control file”.</p>
-    <div id="cf-form" ${rawMode ? "hidden" : ""}>
-      <div class="row"><label>Seller loan number<input data-li="sellerLoanNumber" value="${esc(li.sellerLoanNumber)}" ${editable ? "" : "disabled"}></label>
-        <label>Loan amount<input data-li="loanAmount" value="${esc(li.loanAmount)}" ${editable ? "" : "disabled"}></label>
-        <label>Borrower last name<input data-li="borrowerLastName" value="${esc(li.borrowerLastName)}" ${editable ? "" : "disabled"}></label></div>
-      ${extra.length ? `<p class="hint">Other loanInfo fields: ${extra.map(k => `<span class="mono">${esc(k)}=${esc(li[k])}</span>`).join(", ")}</p>` : ""}
-      <label class="inline"><input type="checkbox" id="cf-extract" ${b.extractionRequired ? "checked" : ""} ${editable ? "" : "disabled"}> extractionRequired</label>
+    <div class="grid2">
+      <div class="card"><div class="card-h">${icon("alert")}<h3>Needs attention</h3><span class="sub">${attn.length}</span><a class="right" href="#/jobs?f=attention">View all</a></div>
+        ${list(attn.slice(0, 8), "Nothing needs attention.", b => esc(attentionReasons(b).join(" · ")) + ` · ${ago(b.updatedAt)}`)}</div>
+      <div class="card"><div class="card-h">${icon("clock")}<h3>In progress</h3><span class="sub">${running.length + setup.length}</span><a class="right" href="#/jobs?f=running">View all</a></div>
+        ${list([...running, ...setup].slice(0, 8), "No jobs in progress.",
+          b => OPEN(b) ? `ACE ${esc(wfOf(b).stage ? "stage " + wfOf(b).stage.toLowerCase() : "queued")} · running ${took(b)} · ${esc(b.submittedBy || "")}` : `setup not finished · ${ago(b.updatedAt)} · ${esc(b.createdBy || "")}`)}</div>
     </div>
-    <div id="cf-raw" ${rawMode ? "" : "hidden"}><textarea id="cf-json" ${editable ? "" : "disabled"}>${J(b.controlOverride || b.controlPreview)}</textarea>
-      <p class="hint">Hand-edited JSON is written as is (use it for negative tests, e.g. a loanId that differs from the request).</p></div>
-    ${rawMode ? "" : `<pre>${J(b.controlPreview)}</pre>`}
-    <div class="row" style="margin-top:10px">
-      ${editable ? `<button id="cf-toggle">${rawMode ? "Back to form" : "Edit raw JSON"}</button>
-        ${b.controlOverride ? `<button id="cf-reset">Discard hand edits</button>` : ""}
-        <button id="cf-save">Save</button><button class="primary" id="cf-stage">Write control file to S3</button>` : ""}
-    </div>`;
+    <div class="card" style="margin-top:18px"><div class="card-h">${icon("ok")}<h3>Recently finished</h3><a class="right" href="#/jobs?f=done">View all</a></div>
+      ${list(closed.slice(0, 10), "No finished jobs in this period.", b => `${whoLine(b)}${b.submittedAt ? ` · took ${took(b)}` : ""}${(b.outcome || {}).description ? " · " + esc(b.outcome.description) : ""}`)}</div>`;
+  $$("#h-body [data-go]").forEach(r => r.onclick = () => location.hash = `#/job/${encodeURIComponent(r.dataset.go)}`);
+  setCount("#n-attn", attn.length);
 }
 
-function submitCard(b) {
-  const ev = (b.events || []).filter(e => ["submitted", "rejected"].includes(e.type)).pop();
-  const canSubmit = ["STAGED", "REJECTED"].includes(b.state);
-  return `<div class="card"><h3><span class="n">3</span>Submit to ACE <span class="mono" style="font-weight:400;color:var(--muted)">POST /integration/loan/onboarding</span></h3>
-    <p class="hint">ACE accepts with an ACE job number and then works in the background (spec 4).</p>
-    ${canSubmit ? (() => { const i = (b.events || []).map(e => e.type).lastIndexOf("staged");
-        const w = i < 0 ? [] : b.events.slice(i).filter(e => e.type === "warning");
-        return w.length ? `<ul class="errs">${w.map(e => `<li>Before you submit: ${esc(e.message)}</li>`).join("")}</ul>` : ""; })() : ""}
-    ${canSubmit ? `<div class="row">
-        <label>Point ACE at (batchPath)<select id="s-mode"><option value="file">control file (…/${esc(b.controlFileName)})</option><option value="folder">folder (…/correlationId=…/)</option></select></label>
-        <label style="flex-basis:100%">ACE endpoint for this submission<input id="s-ace" value="${esc(cfg.defaultAceUrl || "")}" placeholder="default ACE endpoint"></label>
-        <label title="The callback endpoint answers 503 to the first N deliveries: proves ACE retries.">Refuse first N callbacks (simulated outage)<input type="number" id="s-flaky" min="0" max="10" value="0"></label></div>
-      <button class="primary" id="s-submit">Submit to ACE</button>`
-      : b.state === "DRAFT" ? `<p class="hint">Write the control file first.</p>` : ""}
-    ${ev ? `<dl class="kv" style="margin-top:10px"><dt>ACE endpoint</dt><dd class="mono">${esc(b.aceUrl || "—")}</dd><dt>submitted</dt><dd>${when(ev.at)}${ev.by ? " by " + esc(ev.by) : ""}</dd><dt>ACE answer</dt><dd>${esc(ev.message)}</dd><dt>batchPath</dt><dd class="mono">${esc(b.batchPath)}</dd>
-      ${b.flaky ? `<dt>outage</dt><dd>first ${b.flaky} callbacks refused</dd>` : ""}</dl>
-      <details><summary>request / response</summary><pre>${J(ev.data)}</pre></details>` : ""}
-  </div>`;
+// ================================================================== jobs list
+const FILTERS = [["", "All"], ["attention", "Needs attention"], ["running", "In progress"], ["setup", "Drafts"], ["ok", "Completed"], ["failed", "Failed"], ["done", "Finished"]];
+let jobsState = {f: "", q: "", days: "", mine: false, offset: 0};
+async function pageJobs() {
+  const hq = new URLSearchParams(location.hash.split("?")[1] || ""); if (hq.has("f")) { jobsState.f = hq.get("f"); jobsState.offset = 0; }
+  main().innerHTML = `<div class="page-head"><div><h1>Jobs</h1><div class="sub">Every eOCR execution, newest first</div></div>
+    <div class="actions"><button class="btn" id="j-csv">${icon("download")}Export CSV</button><a class="btn primary" href="#/new">${icon("plus")}New job</a></div></div>
+    <div class="toolbar"><div class="seg" id="j-seg">${FILTERS.map(([k, l]) => `<button data-f="${k}" class="${jobsState.f === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <span class="spacer"></span><input type="search" id="j-q" placeholder="Search loan, job, ACE job, person" value="${esc(jobsState.q)}">
+      <select id="j-days"><option value="">All time</option><option value="1">Last 24 h</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select>
+      <label class="switch" style="align-items:center"><input type="checkbox" id="j-mine" ${jobsState.mine ? "checked" : ""}><span>Only mine</span></label></div>
+    <div class="card"><div id="j-body"><div class="empty">Loading…</div></div></div>`;
+  $("#j-days").value = jobsState.days;
+  $("#j-seg").onclick = e => { const b = e.target.closest("button"); if (!b) return; jobsState.f = b.dataset.f; jobsState.offset = 0;
+    $$("#j-seg button").forEach(x => x.classList.toggle("on", x === b)); drawJobs(); };
+  $("#j-q").oninput = e => { jobsState.q = e.target.value; clearTimeout(pageJobs.h); pageJobs.h = setTimeout(() => { jobsState.offset = 0; drawJobs(); }, 300); };
+  $("#j-days").onchange = e => { jobsState.days = e.target.value; jobsState.offset = 0; drawJobs(); };
+  $("#j-mine").onchange = e => { jobsState.mine = e.target.checked; jobsState.offset = 0; drawJobs(); };
+  $("#j-csv").onclick = () => location.href = `${BASE}/api/export/executions.csv?q=${encodeURIComponent(jobsState.q)}&days=${jobsState.days}`;
+  await drawJobs(); every(15000, drawJobs);
+}
+async function drawJobs() {
+  const f = jobsState.f, PAGE = 25;
+  const params = new URLSearchParams({q: jobsState.q, days: jobsState.days, offset: jobsState.offset, limit: PAGE});
+  if (["attention", "running", "setup"].includes(f)) params.set("state", f);
+  if (f === "ok" || f === "failed") params.set("result", f);
+  if (f === "done") params.set("state", "CLOSED");
+  if (jobsState.mine) params.set("mine", "1");
+  let page; try { page = await api("GET", "/api/batches?" + params); } catch (e) { $("#j-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  $("#j-body").innerHTML = page.items.length ? `<div class="tbl"><table><tr><th>Status</th><th>Job</th><th>Progress</th><th>Where it is</th><th>Submitted</th><th>Took</th><th></th></tr>
+    ${page.items.map(b => { const s = statusOf(b), wf = wfOf(b), why = attentionReasons(b);
+      return `<tr class="click" data-go="${esc(b.correlationId)}"><td>${pill(s.label, s.tone)}</td>
+        <td><div style="font-weight:600">Loan ${esc(b.loanId)}</div><div class="mono hint">${esc(b.correlationId)}</div>${b.aceJobId ? `<div class="mono hint">${esc(b.aceJobId)}</div>` : ""}</td>
+        <td>${mini(b)}</td>
+        <td>${b.state === "CLOSED" ? esc((b.outcome || {}).description || "") : OPEN(b) ? `ACE: ${esc(wf.stage || "queued")}${wf.state ? " · " + esc(wf.state) : ""}` : esc(s.label)}
+          ${why.length ? `<div style="color:var(--bad);font-size:12px;margin-top:3px">${icon("alert")} ${esc(why.join(" · "))}</div>` : ""}</td>
+        <td>${b.submittedAt ? `${when(b.submittedAt)}<div class="hint">${esc(b.submittedBy || "unknown")}</div>` : `<span class="hint">not submitted</span><div class="hint">${esc(b.createdBy || "")}</div>`}</td>
+        <td>${took(b)}</td><td>${icon("arrow")}</td></tr>`; }).join("")}</table></div>
+    <div class="wz-foot"><span class="hint">${page.offset + 1}–${page.offset + page.items.length} of ${page.total}</span><span class="spacer"></span>
+      <button class="btn sm" id="j-prev" ${page.offset ? "" : "disabled"}>${icon("back")}Previous</button><button class="btn sm" id="j-next" ${page.offset + page.items.length < page.total ? "" : "disabled"}>Next${icon("arrow")}</button></div>`
+    : `<div class="empty">No jobs match. ${f || jobsState.q ? `<a href="#" id="j-clear">Show all jobs</a>` : `<a href="#/new">Start a new job</a>`}</div>`;
+  $$("#j-body [data-go]").forEach(r => r.onclick = () => location.hash = `#/job/${encodeURIComponent(r.dataset.go)}`);
+  if ($("#j-prev")) { $("#j-prev").onclick = () => { jobsState.offset = Math.max(0, jobsState.offset - PAGE); drawJobs(); }; $("#j-next").onclick = () => { jobsState.offset += PAGE; drawJobs(); }; }
+  if ($("#j-clear")) $("#j-clear").onclick = e => { e.preventDefault(); jobsState = {f: "", q: "", days: "", mine: false, offset: 0}; history.replaceState(null, "", "#/jobs"); pageJobs(); };
 }
 
-function trackCard(b, st, wf) {
-  const hitl = wf.state === "HITL_PENDING" && b.state !== "CLOSED";
-  return `<div class="card wide"><h3><span class="n">4</span>Progress in ACE <span class="mono" style="font-weight:400;color:var(--muted)">GET /integration/loan/status/{aceJobId}</span></h3>
-    <p class="hint">Read from ACE's Status API every ${esc(cfg.trackIntervalSeconds)}s while open (spec 7).</p>
-    ${b.status ? `<dl class="kv"><dt>ACE stage</dt><dd><b>${esc(wf.stage || "—")}</b> · ${esc(wf.state || "—")}</dd>
-        <dt>ACE status</dt><dd>${chip(`${st.code} ${st.value}`, CODE_CLASS(st.code))} ${esc(st.description)}</dd>
-        <dt>Result file</dt><dd class="mono">${esc(b.status.batchPath || "not yet")}</dd>
-        <dt>ACE reported at</dt><dd>${when(b.status.timestamp)}</dd></dl>` : `<p class="hint">${b.aceJobId ? "Waiting for the first status." : "Not submitted yet."}</p>`}
-    ${b.stages.length ? `<div class="scroll" style="margin-top:10px"><table><tr><th>first seen</th><th>stage · state</th><th>status</th><th>took</th></tr>
-      ${b.stages.map((s, i) => { const nx = b.stages[i + 1]; return `<tr><td>${when(s.at)}</td><td>${esc(s.key[0] || "—")} · ${esc(s.key[1] || "—")}</td>
-        <td>${chip(`${s.key[2]} ${s.value}`, CODE_CLASS(s.key[2]))}</td><td>${nx ? dur(Date.parse(nx.at) - Date.parse(s.at)) : ""}</td></tr>`; }).join("")}</table></div>` : ""}
-    ${b.callbackOverdue && !b.callback ? `<p class="errs">No callback yet although the Status API is terminal — use Close… to reconcile.</p>` : ""}
-    ${hitl ? `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><b>HITL review pending.</b>
-      <p class="hint">Act as the ACE reviewer (not an eOCR step) so the job can finish.</p>
-      <button id="h-load">Load review</button><div id="hitl"></div></div>` : ""}
-  </div>`;
-}
-
-function callbackCard(b) {
-  const cbs = b.callbacks || [];
-  return `<div class="card wide"><h3><span class="n">5</span>Callbacks from ACE <span class="mono" style="font-weight:400;color:var(--muted)">POST /eocr/callback</span></h3>
-    <p class="hint">Every time ACE called back, and what the eOCR endpoint answered (spec 5/6).</p>
-    ${cbs.length ? `<div class="scroll"><table><tr><th>#</th><th>received</th><th>our answer</th><th>outcome</th><th>sent by</th><th>spec</th></tr>
-      ${cbs.map(c => { const s = (c.payload || {}).status || {}; return `<tr><td>${c.attempt}</td><td>${when(c.receivedAt)}</td>
-        <td>${chip(c.answeredWith, c.answeredWith === 200 ? "s-ok" : "s-warn")}</td><td>${chip(`${s.code} ${s.value}`, CODE_CLASS(s.code))}</td>
-        <td class="mono" title="${esc(c.callerPrincipal)}">${esc((c.callerPrincipal || "unsigned").split("/").slice(-2, -1)[0] || c.callerPrincipal || "unsigned")}</td>
-        <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} deviations`, "s-bad") : chip("ok", "s-ok")}</td></tr>`; }).join("")}</table></div>
-      <p class="hint" style="margin-top:8px">Idempotency-Key: <span class="mono">${esc([...new Set(cbs.map(c => c.idempotencyKey))].join(", ") || "—")}</span></p>
-      ${cbs.map(c => `<details><summary>attempt ${c.attempt} (${esc(c.answeredWith)}) payload, headers, checks</summary><pre>${J({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers, callerPrincipal: c.callerPrincipal})}</pre></details>`).join("")}`
-      : `<p class="hint">${b.aceJobId ? "Waiting for ACE to call back." : "Nothing yet."}</p>`}
-  </div>`;
-}
-
-function resultCard(b) {
-  const o = b.outcome, r = b.result;
-  if (!o) return `<div class="card"><h3><span class="n">6</span>Result</h3><p class="hint">Filled in when the execution closes: outcome, failed documents and the retrieved *Response.json.</p></div>`;
-  const s = (r || {}).summary;
-  const valid = [0, 1000, 2000, 3000, null].includes(o.code) || o.value === "ABANDONED";
-  return `<div class="card wide"><h3><span class="n">6</span>Result ${valid ? chip(`${o.code ?? "—"} ${o.value}`, o.code === 0 ? "s-ok" : "s-bad")
-      : chip(`invalid callback status: ${JSON.stringify(o.code)} ${o.value}`, "s-bad")}</h3>
-    <dl class="kv"><dt>description</dt><dd>${o.description ? esc(o.description) : `<span class="hint">(empty)</span>`}</dd><dt>closed</dt><dd>${when(b.closedAt)} by ${esc(b.closedBy)}${b.closedByUser ? " · " + esc(b.closedByUser) : ""}</dd>
-      <dt>Result file</dt><dd class="mono">${esc(o.batchPath || "—")}</dd>
-      ${(o.failedDocuments || []).length ? `<dt>Failed documents</dt><dd>${o.failedDocuments.map(f => `<div><span class="mono">${esc(f.documentName)}</span> — ${esc(f.reason)}</div>`).join("")}</dd>` : ""}
-      ${r && r.key ? `<dt>Response.json</dt><dd class="mono">${esc(r.key)} ${r.ok ? chip("matches spec 6.4/6.5", "s-ok") : chip("contract errors", "s-bad")}</dd>` : ""}
-    </dl>
-    ${r && r.errors.length ? `<ul class="errs">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
-    ${s ? `<p class="hint" style="margin-top:10px">validationStatus <b>${esc(s.validationStatus)}</b> · ${s.documentTypes} document types · ${s.documents} documents · ${s.extractedFields} extracted fields</p>
-      <div class="scroll"><table><tr><th>document type</th><th>file</th><th>pages</th><th>docType</th><th>extracted fields</th></tr>
-      ${s.rows.map(x => `<tr><td>${esc(x.documentType)}</td><td class="mono">${esc(x.fileName)}</td><td class="mono">${esc(x.pageRange)}</td>
-        <td>${esc(x.docTypeName || x.docTypeId)}${x.duplicatePagesOf ? ` <span class="chip s-warn">dup of ${esc(x.duplicatePagesOf)}</span>` : ""}</td>
-        <td>${Object.entries(x.fields || {}).map(([k, v]) => `<div><span class="mono">${esc(k)}</span>: ${esc(v)}</div>`).join("") || "—"}</td></tr>`).join("")}</table></div>
-      <p><button id="r-raw">View raw Response.json</button></p><pre id="r-json" hidden></pre>` : ""}
-  </div>`;
-}
-
-function validationCard(b) {
-  const v = b.validation;
-  if (!v || !b.aceJobId) return "";
-  const vs = v.validationStatus;
-  const mark = x => x === "match" ? chip("match", "s-ok") : x === "mismatch" ? chip("mismatch", "s-bad") : `<span class="hint" style="margin:0">—</span>`;
-  const hitlCell = f => f.hitlDecision === true ? chip("confirmed match", "s-ok") : f.hitlDecision === false ? chip("confirmed mismatch", "s-bad")
-    : f.hitlExtracted != null ? `<span class="mono">${esc(f.hitlExtracted)}</span> <span class="hint" style="margin:0">(no decision)</span>` : "—";
-  const noValues = vs === "FAILED" && !v.fields.some(f => f.extracted != null);
-  return `<div class="card wide"><h3>Validation ${vs ? chip(`NOTE validation ${vs}`, vs === "PASSED" ? "s-ok" : vs === "FAILED" ? "s-bad" : "s-idle")
-      : chip(v.stoppedAt ? "did not run" : b.state === "CLOSED" ? "not reported" : "pending", "s-idle")}
-      ${v.findings.length ? chip(`${v.findings.length} finding${v.findings.length > 1 ? "s" : ""}`, "s-bad") : ""}</h3>
-    <p class="hint">Loan data in the control file against what ACE read from the NOTE, ACE's verdict and the HITL reviewer's decision,
-      then what ACE did with each document. "Our check" is the simulator's own comparison.</p>
-    ${v.stoppedAt ? `<p class="hint"><b>ACE stopped before NOTE validation (${esc(v.stoppedAt)}).</b> The loan data below was not compared.</p>` : ""}
-    ${v.fields.length ? `<div style="overflow-x:auto"><table><tr><th>field</th><th>control file</th><th>found by ACE</th><th>our check</th><th>ACE verdict</th><th>HITL reviewer</th></tr>
-      ${v.fields.map(f => `<tr><td>${esc(f.label)}</td><td class="mono">${esc(f.control)}</td>
-        <td>${f.extracted != null ? `<span class="mono">${esc(f.extracted)}</span> <span class="hint" style="margin:0">${esc(f.source || "")}</span>` : "—"}</td>
-        <td>${mark(f.ours)}</td><td>${mark(f.ace)}</td><td>${hitlCell(f)}</td></tr>`).join("")}</table></div>` : `<p class="hint">The control file carries no loan fields to validate.</p>`}
-    ${noValues ? `<p class="hint">ACE returns no extracted values on VALIDATION_FAILED (spec 6.5). The values come from the HITL review;
-      open it while the job waits for review and the console keeps it.</p>` : ""}
-    ${v.description && [2000].includes((b.outcome || {}).code) ? `<p class="hint">ACE's description: <b>${esc(v.description)}</b></p>` : ""}
-    <h4 style="margin:14px 0 6px;font-size:13px">Document checks</h4>
-    <div style="overflow-x:auto"><table><tr><th>document</th><th>size</th><th>pre-check</th><th>classified as</th><th>pages</th><th>extracted fields</th></tr>
-      ${v.documents.map(d => `<tr><td class="mono">${esc(d.fileName)}</td><td>${d.bytes == null ? "—" : fmt(d.bytes)}</td>
-        <td>${d.precheck == null ? "—" : d.precheck === "passed" ? chip("passed", "s-ok") : d.precheck.startsWith("failed") ? chip(d.precheck, "s-bad")
-          : `<span class="hint" style="margin:0">${esc(d.precheck)}</span>`}${d.note ? `<div class="hint" style="margin:2px 0 0;color:var(--warn)">${esc(d.note)}</div>` : ""}</td>
-        <td>${d.types.length ? d.types.map(t => esc(t)).join(", ") : "—"}${d.duplicates.length ? " " + chip(`duplicate of ${d.duplicates.join(", ")}`, "s-warn") : ""}</td>
-        <td class="mono">${esc(d.pages || "—")}</td><td>${d.types.length ? d.extractedFields : "—"}</td></tr>`).join("")}</table></div>
-    ${v.findings.length ? `<ul class="errs" style="margin-top:10px">${v.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul>`
-      : b.state === "CLOSED" ? `<p class="okline">Validation and document results are consistent.</p>` : ""}
-  </div>`;
-}
-
-function recordsCard(b) {
-  const recs = b.records || [];
-  return `<div class="card"><h3>Stored records</h3><p class="hint mono">s3://${esc(cfg.intakeBucket)}/eocr-sim/records/${esc(b.correlationId)}/</p>
-    <p class="hint">Written once and kept: what was submitted (control file, document sizes and ETags, request/response) and how it ended
-      (outcome, every callback attempt, Status API at close, a copy of *Response.json).</p>
-    ${recs.length ? `<table><tr><th>record</th><th>stored</th><th>bytes</th></tr>${recs.map(r => `<tr><td class="mono"><a href="#" data-rec="${esc(r.name)}">${esc(r.name)}</a></td>
-      <td>${when(r.storedAt)}</td><td>${fmt(r.bytes)}</td></tr>`).join("")}</table><pre id="rec-view" hidden></pre>`
-      : `<p class="hint">Nothing stored yet: the submission record is written on onboarding, the outcome record on close.</p>`}
-  </div>`;
-}
-
-function checksCard(b) {
-  const rows = b.specChecklist || [];
-  const failed = rows.filter(r => r.result === "failed"), devs = failed.reduce((n, r) => n + r.errors.length, 0);
-  const passed = rows.filter(r => r.result === "passed").length;
-  const res = r => r.result === "passed" ? chip("passed", "s-ok") : r.result === "failed" ? chip(`failed · ${r.errors.length}`, "s-bad")
-    : r.result === "pending" ? chip(r.note || "pending", "s-idle") : `<span class="hint" style="margin:0">n/a</span>`;
-  return `<div class="card wide"><h3>Spec compliance ${devs ? chip(`${devs} deviation${devs > 1 ? "s" : ""}`, "s-bad") : b.state === "CLOSED" ? chip("all checks passed", "s-ok") : chip("so far ok", "s-idle")}
-      <span style="font-weight:400;color:var(--muted);font-size:12.5px">${passed} of ${rows.filter(r => r.result !== "n/a").length} applicable checks passed</span></h3>
-    <p class="hint">Each clause of the ACE to eOCR Integration Specification v1.1 this execution touches. 3.1 and 3.2 are eOCR's side (the package you staged); the rest is what ACE sent back.</p>
-    <div style="overflow-x:auto"><table><tr><th style="width:120px">spec</th><th>check</th><th style="width:170px">result</th></tr>
-      ${rows.map(r => `<tr><td class="mono">${esc(r.clause)}</td><td>${esc(r.check)}
-        ${r.errors.length ? `<ul class="errs" style="margin:6px 0 0;padding-left:18px">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</td><td>${res(r)}</td></tr>`).join("")}
-    </table></div>
-  </div>`;
-}
-
-function timelineCard(b) {
-  const evs = [...(b.events || [])].reverse();
-  const cls = t => ({"validation-finding": "s-bad", hitl: "s-warn", "contract-error": "s-bad", rejected: "s-bad", error: "s-bad", warning: "s-warn", "callback-refused": "s-warn", closed: "s-ok", callback: "s-ok", result: "s-info"}[t] || "s-idle");
-  return `<div class="card wide"><h3>Timeline <span style="font-weight:400;color:var(--muted)">(${evs.length} events, newest first)</span></h3>
-    <div class="scroll" style="max-height:420px">${evs.map(e => `<div class="ev"><span class="t">${when(e.at)}</span><span>${chip(e.type, cls(e.type))}</span>
-      <div>${esc(e.message)}${e.by ? ` <span style="color:var(--muted)">— ${esc(e.by)}</span>` : ""}${e.data ? `<details><summary class="hint" style="margin:0">details</summary><pre>${J(e.data)}</pre></details>` : ""}</div></div>`).join("")}</div>
-  </div>`;
-}
-
-function wire(b) {
-  const cid = encodeURIComponent(b.correlationId), base = "/api/batches/" + cid;
-  const setView = v => { views[b.correlationId] = v; document.querySelectorAll("[data-view]").forEach(x => x.classList.toggle("on", x.dataset.view === v));
-    $("#pane-track").hidden = v !== "track"; $("#pane-pkg").hidden = v !== "pkg"; };
-  document.querySelectorAll("[data-view]").forEach(x => x.onclick = () => setView(x.dataset.view));
-  document.querySelectorAll("[data-goto]").forEach(x => x.onclick = () => {
-    if (x.dataset.goto === "pkg") return setView("pkg");
-    setView("track"); const h = $("#h-load"); if (h) { h.scrollIntoView({block: "center"}); h.click(); } });
-  document.querySelectorAll("[data-open]").forEach(x => x.onclick = e => { e.preventDefault(); select(x.dataset.open); });
-  const after = async r => { if (r) { controlDirty = false; await loadDetail(true); loadList(); } };
-  $("#a-refresh").onclick = e => act(e.target, () => api("POST", base + "/refresh"), "Status refreshed").then(after);
-  $("#a-resubmit").onclick = e => act(e.target, () => api("POST", base + "/resubmit"), "New execution created").then(r => r && (loadList(), select(r.correlationId)));
-  $("#a-close").onclick = () => { $("#c-note").value = ""; $("#dlg-close").showModal(); };
-  document.querySelectorAll("[data-rm]").forEach(btn => btn.onclick = e => act(e.target, () => api("DELETE", `${base}/files/${encodeURIComponent(btn.dataset.rm)}`), "Removed").then(after));
-  document.querySelectorAll("[data-test]").forEach(btn => btn.onclick = e =>
-    act(e.target, () => api("POST", base + "/testdata", {kind: btn.dataset.test, pages: +$("#t-pages").value}), "Test document staged").then(after));
-  const files = $("#files"), drop = $("#drop");
-  const upload = async list => { for (const f of list) { toast(`Uploading ${f.name}…`);
-      const r = await act(null, () => api("PUT", `${base}/files/${encodeURIComponent(f.name)}?contentType=${encodeURIComponent(f.type || "")}`, undefined, f), `Uploaded ${f.name}`);
-      if (!r) break; } await after(true); };
-  if (files) files.onchange = () => upload([...files.files]);
-  if (drop) {
-    drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
-    drop.ondragleave = () => drop.classList.remove("over");
-    drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files]); };
+// ================================================================== new job wizard
+const WZ = [["Loan details", "goes into the control file"], ["Documents", "uploaded to the S3 folder"], ["Control file", "generated for you"], ["Check S3 folder", "what ACE will read"], ["Submit", "call ACE"]];
+let wz = null;
+async function pageWizard(cid) {
+  wz = {cid, batch: null, step: 0, raw: false, uploads: {}, extraLoan: null};
+  if (cid) {
+    try { wz.batch = await api("GET", "/api/batches/" + encodeURIComponent(cid)); } catch (e) { main().innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    if (!["DRAFT", "STAGED", "REJECTED"].includes(wz.batch.state)) { location.replace(`#/job/${encodeURIComponent(cid)}`); return; }
+    wz.step = wz.batch.state === "DRAFT" ? (wz.batch.documents.length && !wz.batch.resubmissionOf ? 2 : 1) : wz.batch.state === "REJECTED" ? 4 : 3;
+    wz.raw = wz.batch.controlOverride != null;
   }
-  const card = $("#control-card");
-  card.oninput = () => controlDirty = true;
-  const controlBody = () => {
-    if (rawMode) { let parsed; try { parsed = JSON.parse($("#cf-json").value); } catch (err) { throw new Error("Control file JSON: " + err.message); } return {controlOverride: parsed}; }
-    const li = {...(current.loanInfo || {})}; card.querySelectorAll("[data-li]").forEach(i => li[i.dataset.li] = i.value.trim());
-    return {loanInfo: li, extractionRequired: $("#cf-extract").checked};
-  };
-  if ($("#cf-toggle")) $("#cf-toggle").onclick = () => { rawMode = !rawMode; controlDirty = false; renderControl(current, true); wire(current); };
-  if ($("#cf-reset")) $("#cf-reset").onclick = e => act(e.target, () => api("PUT", base + "/control", {controlOverride: null}), "Hand edits discarded").then(r => { rawMode = false; after(r); });
-  if ($("#cf-save")) $("#cf-save").onclick = e => act(e.target, () => api("PUT", base + "/control", controlBody()), "Saved").then(after);
-  if ($("#cf-stage")) $("#cf-stage").onclick = e => act(e.target, async () => { await api("PUT", base + "/control", controlBody()); return api("POST", base + "/stage"); },
-    "Control file written to S3").then(after);
-  if ($("#s-submit")) $("#s-submit").onclick = e => act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}))
-    .then(r => { if (r) { toast(r.state === "REJECTED" ? "ACE rejected the onboarding request — see the banner" : `Accepted by ACE: ${r.aceJobId}`, r.state === "REJECTED");
-      if (r.state !== "REJECTED") views[r.correlationId] = "track"; } after(r); });
-  document.querySelectorAll("[data-rec]").forEach(a => a.onclick = e => { e.preventDefault();
-    act(null, () => api("GET", `${base}/records/${encodeURIComponent(a.dataset.rec)}`)).then(r => { if (r) { const p = $("#rec-view"); p.textContent = JSON.stringify(r, null, 2); p.hidden = false; } }); });
-  if ($("#r-raw")) $("#r-raw").onclick = e => act(e.target, () => api("GET", base + "/response")).then(r => { if (r) { const p = $("#r-json"); p.textContent = JSON.stringify(r, null, 2); p.hidden = !p.hidden; } });
-  if ($("#h-load")) $("#h-load").onclick = e => act(e.target, () => api("GET", base + "/hitl")).then(r => {
-    if (!r) return; const fields = ((r.review || {}).fieldDetails) || [];
-    $("#hitl").innerHTML = `<p class="hint">HTTP ${r.httpStatus} · totalMatches ${esc((r.review || {}).totalMatches)}</p>
-      <table><tr><th>field</th><th>control file</th><th>extracted</th><th>matched?</th></tr>${fields.map((f, i) => `<tr><td class="mono">${esc(f.fieldName)}</td>
-        <td>${esc(f.metadataValue)}</td><td>${esc(f.extractedValue)}</td><td><input type="checkbox" data-hf="${i}" ${f.isMatched !== false ? "checked" : ""}></td></tr>`).join("")}</table>
-      <p><button class="primary" id="h-send">Send reviewer decision</button></p>`;
-    $("#h-send").onclick = ev => act(ev.target, () => api("POST", base + "/hitl", {fields: fields.map((f, i) => ({fieldName: f.fieldName, metadataValue: f.metadataValue,
-      extractedValue: f.extractedValue, isMatched: $(`[data-hf="${i}"]`).checked}))}), "Decision sent").then(after);
+  drawWizard();
+}
+function wzMaxStep() { const b = wz.batch; if (!b) return 0; if (b.state === "DRAFT") return b.documents.length ? 2 : 1; return 4; }
+function drawWizard() {
+  const b = wz.batch, max = wzMaxStep();
+  main().innerHTML = `<div class="crumbs"><a href="#/jobs">Jobs</a> / ${b ? `<a href="#/job/${encodeURIComponent(b.correlationId)}">${esc(b.correlationId)}</a> / setup` : "New job"}</div>
+    <div class="page-head"><div><h1>${b ? `Set up the job for loan ${esc(b.loanId)}` : "New job"}</h1>
+      <div class="sub">Prepare the package the way eOCR does, then send it to ACE. Your progress is saved at every step.</div></div></div>
+    <div class="wz-steps">${WZ.map(([t, s], i) => { const done = i < max && i !== wz.step;
+      return `<button data-step="${i}" class="${i === wz.step ? "on" : done ? "done" : ""}" ${i > max ? "disabled" : ""}>
+      <span class="n">${done ? icon("check") : i + 1}</span><span><b>${t}</b><small>${s}</small></span></button>`; }).join("")}</div>
+    <div class="wz"><div class="card"><div class="card-b" id="wz-body"></div><div class="wz-foot" id="wz-foot"></div></div>
+      <div class="wz-side" id="wz-side"></div></div>`;
+  $$(".wz-steps [data-step]").forEach(x => x.onclick = () => { wz.step = +x.dataset.step; drawWizard(); });
+  [wzLoan, wzDocs, wzControl, wzFolder, wzSubmit][wz.step]();
+  wzSide();
+}
+function wzFoot(nextLabel, onNext, opts = {}) {
+  $("#wz-foot").innerHTML = `${wz.step ? `<button class="btn" id="wz-back">${icon("back")}Back</button>` : ""}<span class="hint">${opts.msg || ""}</span><span class="spacer"></span>
+    <button class="btn primary ${opts.big ? "lg" : ""}" id="wz-next">${nextLabel}${icon(opts.icon || "arrow")}</button>`;
+  if ($("#wz-back")) $("#wz-back").onclick = () => { wz.step--; drawWizard(); };
+  $("#wz-next").onclick = e => onNext(e.currentTarget);
+}
+async function wzReload() { wz.batch = await api("GET", "/api/batches/" + encodeURIComponent(wz.cid)); }
+function wzSide() {
+  const b = wz.batch, docs = b ? b.documents : [], total = docs.reduce((a, d) => a + (d.bytes || 0), 0);
+  const folder = b ? `s3://${cfg.intakeBucket}/${b.folder}` : `s3://${cfg.intakeBucket}/loanId=…/correlationId=…/`;
+  $("#wz-side").innerHTML = `<div class="card"><div class="card-h"><h3>This job</h3>${b ? pill(statusOf(b).label, statusOf(b).tone) : ""}</div><div class="card-b">
+    <dl class="kv"><dt>Loan</dt><dd><b>${esc(b ? b.loanId : "—")}</b></dd><dt>Job</dt><dd class="mono">${esc(b ? b.correlationId : "created in step 1")}</dd>
+      <dt>Extraction</dt><dd>${b ? (b.extractionRequired ? "whole package" : "classification only") : "—"}</dd>
+      <dt>Documents</dt><dd>${docs.length} file${docs.length === 1 ? "" : "s"} · ${bytes(total)}</dd>
+      <dt>Control file</dt><dd>${b ? `<span class="mono">${esc(b.controlFileName)}</span> ${b.state === "DRAFT" ? pill("not written", "idle") : pill("in S3", "ok")}` : "—"}</dd>
+      <dt>ACE</dt><dd class="mono" style="font-size:12px">${esc(cfg.defaultAceUrl || "—")}</dd></dl>
+    <div class="hint" style="margin-top:14px;font-weight:600">S3 folder</div><div class="loc" style="margin-top:4px">${icon("folder")}<span>${esc(folder)}</span></div>
+    ${docs.length ? `<ul class="checks" style="margin-top:10px">${docs.map(d => `<li>${icon("file")}<span class="mono" style="font-size:12px;word-break:break-all">${esc(d.fileName)}</span><span class="spacer"></span><span class="hint">${bytes(d.bytes)}</span></li>`).join("")}</ul>` : ""}
+  </div></div>`;
+}
+function wzLoan() {
+  const b = wz.batch, li = b ? b.loanInfo : {};
+  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Loan details</h2><p class="hint" style="margin:4px 0 18px">These values go into the control file's <span class="mono">loanInfo</span>.
+      ACE checks them against the NOTE, so a wrong value here is how you test a validation failure.</p>
+    <div class="form-grid">
+      <label class="field"><span>Loan ID <span class="req">*</span></span><input id="w-loan" value="${esc(b ? b.loanId : "")}" ${b ? "disabled" : ""}><small>Names the S3 folder: loanId=&lt;this&gt;</small></label>
+      <label class="field"><span>Job (correlationId)</span><input id="w-cid" value="${esc(b ? b.correlationId : "")}" placeholder="generated: eocr-exec-…" ${b ? "disabled" : ""}><small>One eOCR execution; leave empty to generate</small></label>
+    </div>
+    <div class="form-grid" style="margin-top:16px">
+      <label class="field"><span>Seller loan number <span class="req">*</span></span><input id="w-seller" value="${esc(li.sellerLoanNumber)}"></label>
+      <label class="field"><span>Loan amount <span class="req">*</span></span><input id="w-amount" value="${esc(li.loanAmount)}" inputmode="decimal"></label>
+      <label class="field"><span>Borrower last name <span class="req">*</span></span><input id="w-borrower" value="${esc(li.borrowerLastName)}"></label>
+    </div>
+    <div style="margin-top:18px;display:grid;gap:12px">
+      <label class="switch"><input type="checkbox" id="w-extract" ${!b || b.extractionRequired ? "checked" : ""}><span><b>Extract fields from the whole package</b>
+        <div class="hint">extractionRequired "true". Off: ACE only classifies the documents (and still validates the NOTE).</div></span></label>
+      <details><summary>Advanced</summary><div class="form-grid" style="margin-top:10px">
+        <label class="field"><span>Control file name</span><input id="w-cf" value="${esc(b ? b.controlFileName : "controlfile.json")}" ${b ? "disabled" : ""}></label></div></details>
+    </div>
+    <div style="margin-top:18px"><button class="btn sm" id="w-fill">${icon("file")}Fill from the environment's test loan</button></div>`;
+  $("#w-fill").onclick = e => act(e.currentTarget, () => api("GET", "/api/testloan")).then(t => {
+    if (!t) return; if (t.error) return toast("No test loan: " + t.error, true);
+    if (!wz.batch) $("#w-loan").value = t.loanId; const l = t.loanInfo || {}; wz.extraLoan = l;
+    $("#w-seller").value = l.sellerLoanNumber || ""; $("#w-amount").value = l.loanAmount || ""; $("#w-borrower").value = l.borrowerLastName || ""; });
+  wzFoot(wz.batch ? "Save and continue" : "Create the job and continue", async btn => {
+    const loanInfo = {...(wz.batch ? wz.batch.loanInfo : wz.extraLoan || {}), sellerLoanNumber: $("#w-seller").value.trim(), loanAmount: $("#w-amount").value.trim(), borrowerLastName: $("#w-borrower").value.trim()};
+    const missing = [["sellerLoanNumber", "Seller loan number"], ["loanAmount", "Loan amount"], ["borrowerLastName", "Borrower last name"]].filter(([k]) => !loanInfo[k]).map(([, l]) => l);
+    if (!wz.batch && !$("#w-loan").value.trim()) { toast("Enter the loan ID", true); $("#w-loan").focus(); return; }
+    if (missing.length && !confirm(`${missing.join(", ")} ${missing.length > 1 ? "are" : "is"} empty. The spec requires ${missing.length > 1 ? "them" : "it"} in the control file. Continue anyway (a negative test)?`)) return;
+    if (!wz.batch) {
+      const r = await act(btn, () => api("POST", "/api/batches", {loanId: $("#w-loan").value.trim(), correlationId: $("#w-cid").value.trim(), loanInfo,
+        extractionRequired: $("#w-extract").checked, controlFileName: $("#w-cf").value.trim()}), "Job created");
+      if (!r) return;
+      wz.cid = r.correlationId; history.replaceState(null, "", `#/job/${encodeURIComponent(r.correlationId)}/setup`);
+    } else if (!await act(btn, () => api("PUT", `/api/batches/${encodeURIComponent(wz.cid)}/control`, {loanInfo, extractionRequired: $("#w-extract").checked}))) return;
+    await wzReload(); wz.step = 1; drawWizard();
   });
 }
-
-$("#c-cancel").onclick = () => $("#dlg-close").close();
-$("#c-ok").onclick = e => act(e.target, () => api("POST", `/api/batches/${encodeURIComponent(selected)}/close`, {note: $("#c-note").value}), "Execution closed")
-  .then(r => { $("#dlg-close").close(); if (r) { loadDetail(true); loadList(); } });
-
-// ---------------------------------------------------------------- new execution
-$("#new").onclick = () => { ["n-loan", "n-cid", "n-seller", "n-amount", "n-borrower"].forEach(id => $("#" + id).value = ""); $("#dlg-new").showModal(); };
-$("#n-cancel").onclick = () => $("#dlg-new").close();
-$("#n-fill").onclick = e => act(e.target, () => api("GET", "/api/testloan")).then(t => {
-  if (!t) return; if (t.error) return toast("No test loan: " + t.error, true);
-  $("#n-loan").value = t.loanId; const li = t.loanInfo || {};
-  $("#n-seller").value = li.sellerLoanNumber || ""; $("#n-amount").value = li.loanAmount || ""; $("#n-borrower").value = li.borrowerLastName || "";
-  $("#n-fill").dataset.extra = JSON.stringify(li);
-});
-$("#n-create").onclick = e => {
-  const li = JSON.parse($("#n-fill").dataset.extra || "{}");
-  Object.assign(li, {sellerLoanNumber: $("#n-seller").value.trim(), loanAmount: $("#n-amount").value.trim(), borrowerLastName: $("#n-borrower").value.trim()});
-  act(e.target, () => api("POST", "/api/batches", {loanId: $("#n-loan").value.trim(), correlationId: $("#n-cid").value.trim(), loanInfo: li,
-    extractionRequired: $("#n-extract").checked, controlFileName: $("#n-control").value.trim()}), "Execution created")
-    .then(r => { if (r) { $("#dlg-new").close(); delete $("#n-fill").dataset.extra; showTab("exec"); select(r.correlationId); } });
-};
-
-// ---------------------------------------------------------------- reports
-async function loadReports() {
-  let reps; try { reps = await api("GET", "/api/reports"); } catch (e) { $("#reports").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  $("#reports").innerHTML = `<p class="hint" style="color:var(--muted)">Reports written by scripted runs (<span class="mono">eocr_sim.py run</span>). Their executions also appear under Executions.</p>` +
-    (reps.length ? reps.map(r => `<div class="card report"><h3>${when(r.finishedAt)} ${chip(r.passed ? "PASSED" : "FAILED", r.passed ? "s-ok" : "s-bad")}
-      <span class="mono" style="font-weight:400;color:var(--muted)">${esc(r.key)}</span></h3>
-      <table><tr><th>scenario</th><th>result</th><th>execution</th><th>minutes</th><th>errors</th></tr>
-      ${r.results.map(x => `<tr><td>${esc(x.scenario)}</td><td>${chip(x.passed ? "passed" : "failed", x.passed ? "s-ok" : "s-bad")}</td>
-        <td class="mono">${x.correlationId ? `<a href="#${esc(x.correlationId)}" data-go="${esc(x.correlationId)}">${esc(x.correlationId)}</a>` : ""} ${esc(x.aceJobId || "")}</td>
-        <td>${esc(x.minutes ?? "")}</td><td>${(x.errors || []).map(e => `<div class="errs">${esc(e)}</div>`).join("")}</td></tr>`).join("")}</table></div>`).join("")
-      : `<div class="empty">No scenario reports yet.</div>`);
+function wzDocs() {
+  const b = wz.batch, base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
+  const rows = [...b.documents.map(d => ({...d, state: "done"})), ...Object.values(wz.uploads).filter(u => !b.documents.some(d => d.fileName === u.name))];
+  $("#wz-body").innerHTML = `${b.resubmissionOf ? `<div class="status-card info" style="padding:12px 16px;margin-bottom:16px"><b>Resubmission of <a href="#/job/${encodeURIComponent(b.resubmissionOf)}">${esc(b.resubmissionOf)}</a>.</b>
+      The documents were copied from that job: remove or replace the ones that failed, then continue.</div>` : ""}<h2 style="font-size:17px">Documents</h2><p class="hint" style="margin:4px 0 16px">Every file you add is uploaded to the job's S3 folder and listed in the control file,
+      the way eOCR stages a loan package. Remove a file to take it out of both.</p>
+    <div class="drop" id="w-drop">${icon("upload")}<b>Drop PDF files here</b>or <label style="color:var(--brand);cursor:pointer;font-weight:600">choose files<input type="file" id="w-files" multiple hidden></label></div>
+    <div class="toolbar" style="margin:12px 0 0"><span class="hint">Or add test files:</span>
+      <input type="number" id="w-pages" value="40" min="1" style="width:76px" title="pages"><span class="hint">pages</span>
+      <button class="btn sm" data-test="package">+ Loan package slice (with the NOTE)</button>
+      <button class="btn sm" data-test="locked">+ Password-protected PDF</button><button class="btn sm" data-test="corrupt">+ Corrupt PDF</button></div>
+    <div class="card" style="margin-top:16px;box-shadow:none">${rows.length ? `<div class="tbl"><table><tr><th>File</th><th>Type</th><th>Size</th><th>Status</th><th></th></tr>
+      ${rows.map(d => `<tr data-file="${esc(d.fileName || d.name)}"><td class="mono">${esc(d.fileName || d.name)}${d.origin && d.origin !== "upload" ? `<div class="hint">${esc(d.origin)}</div>` : ""}</td><td>${esc(d.contentType || "")}</td>
+        <td>${bytes(d.bytes ?? d.size)}</td><td>${d.state === "done" ? pill("in S3 · in control file", "ok") : d.state === "error" ? pill(d.error, "bad")
+          : `<div class="bar"><i style="width:${Math.round((d.progress || 0) * 100)}%"></i></div>`}</td>
+        <td>${d.state === "done" ? `<button class="btn sm ghost danger" data-rm="${esc(d.fileName)}" title="Remove">${icon("x")}</button>` : ""}</td></tr>`).join("")}</table></div>`
+      : `<div class="empty">No documents yet. A loan package is usually one or more PDFs, one of them containing the NOTE.</div>`}</div>`;
+  const drop = $("#w-drop");
+  drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); }; drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); };
+  $("#w-files").onchange = e => addFiles([...e.target.files]);
+  $$("[data-test]").forEach(x => x.onclick = e => act(e.currentTarget, () => api("POST", base + "/testdata", {kind: x.dataset.test, pages: +$("#w-pages").value}), "Test file added")
+    .then(async r => { if (r) { await wzReload(); drawWizard(); } }));
+  $$("[data-rm]").forEach(x => x.onclick = e => act(e.currentTarget, () => api("DELETE", `${base}/files/${encodeURIComponent(x.dataset.rm)}`), "Removed")
+    .then(async r => { if (r) { await wzReload(); drawWizard(); } }));
+  async function addFiles(files) {
+    for (const f of files) wz.uploads[f.name] = {name: f.name, size: f.size, contentType: f.type || "", state: "up", progress: 0};
+    wzDocs();
+    for (const f of files) {
+      try {
+        await upload(`${base}/files/${encodeURIComponent(f.name)}?contentType=${encodeURIComponent(f.type || "")}`, f, p => {
+          const bar = $$("#wz-body tr[data-file]").find(r => r.dataset.file === f.name); const i = bar && bar.querySelector(".bar i"); if (i) i.style.width = `${Math.round(p * 100)}%`; });
+        delete wz.uploads[f.name];
+      } catch (e) { wz.uploads[f.name] = {...wz.uploads[f.name], state: "error", error: e.message}; toast(`${f.name}: ${e.message}`, true); }
+    }
+    await wzReload(); drawWizard();
+  }
+  wzFoot("Continue to the control file", async () => {
+    if (!wz.batch.documents.length && !confirm("There are no documents. ACE will reject the package at pre-check. Continue anyway (a negative test)?")) return;
+    wz.step = 2; drawWizard();
+  }, {msg: `${b.documents.length} file(s) in the folder`});
 }
-$("#reports").addEventListener("click", e => { const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); select(a.dataset.go); } });
-const TABS = {pipe: loadPipeline, exec: loadList, cb: loadCallbacks, rep: loadReports};
-let tab = "pipe";
-function showTab(t) {
-  tab = t;
-  for (const k of Object.keys(TABS)) { $("#tab-" + k).classList.toggle("on", k === t); $("#view-" + k).hidden = k !== t; }
-  TABS[t]();
+function jsonHtml(v) {
+  return esc(JSON.stringify(v, null, 2)).replace(/(&quot;[^&]*?&quot;)(\s*:)/g, '<span class="k">$1</span>$2').replace(/:\s(&quot;.*?&quot;)/g, ': <span class="s">$1</span>');
 }
-for (const k of Object.keys(TABS)) $("#tab-" + k).onclick = () => showTab(k);
-
-// ---------------------------------------------------------------- pipeline
-const COLUMNS = [
-  ["Draft", b => b.state === "DRAFT"],
-  ["Staged", b => b.state === "STAGED"],
-  ["Processing in ACE", b => ["SUBMITTED", "IN_PROGRESS"].includes(b.state) && !TERMINAL(b)],
-  ["Awaiting callback", b => (["SUBMITTED", "IN_PROGRESS"].includes(b.state) && TERMINAL(b)) || b.state === "CALLBACK_RECEIVED"],
-  ["Closed · completed", b => b.state === "CLOSED" && b.outcome && b.outcome.code === 0],
-  ["Closed · failed", b => b.state === "CLOSED" && !(b.outcome && b.outcome.code === 0)],
-  ["Rejected", b => b.state === "REJECTED"],
-];
-const TERMINAL = b => [0, 1000, 2000, 3000].includes((b.status || {}).code);
-let pipeFilter = "", colLimit = {};
-const COL_PAGE = 20;
-async function loadPipeline() {
-  let items;
-  try { items = (await api("GET", `/api/batches?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}&limit=all${$("#p-mine").checked ? "&mine=1" : ""}`)).items; }
-  catch (e) { $("#board").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  const day = Date.now() - 86400e3;
-  const closed = items.filter(b => b.state === "CLOSED");
-  const ok = closed.filter(b => b.outcome && b.outcome.code === 0);
-  const timed = items.filter(b => b.submittedAt && b.callbackAt).map(b => Date.parse(b.callbackAt) - Date.parse(b.submittedAt));
-  const attn = items.filter(needsAttention);
-  updateBadge("pipe", items.filter(needsAttention).length);
-  const tiles = [
-    ["", items.length, `executions (${$("#p-days").selectedOptions[0].text.toLowerCase()})`],
-    ["today", items.filter(b => b.submittedAt && Date.parse(b.submittedAt) > day).length, "submitted in the last 24h"],
-    ["open", items.filter(OPEN).length, "open in ACE"],
-    ["ok", ok.length, `completed${closed.length ? ` · ${Math.round(100 * ok.length / closed.length)}% of closed` : ""}`],
-    ["failed", closed.length - ok.length, "failed or abandoned"],
-    ["", timed.length ? dur(timed.reduce((a, x) => a + x, 0) / timed.length) : "—", "average time to callback"],
-    ["attention", attn.length, "need attention"],
-  ];
-  $("#stats").innerHTML = tiles.map(([k, v, l]) => `<div class="stat ${k ? "click" : ""} ${k === "attention" && v ? "attn" : ""} ${pipeFilter === k && k ? "on" : ""}" data-f="${k}">
-    <div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
-  const shown = items.filter(b => !pipeFilter || (pipeFilter === "today" ? b.submittedAt && Date.parse(b.submittedAt) > day : pipeFilter === "open" ? OPEN(b)
-    : pipeFilter === "ok" ? b.state === "CLOSED" && b.outcome && b.outcome.code === 0 : pipeFilter === "failed" ? b.state === "CLOSED" && !(b.outcome && b.outcome.code === 0)
-    : needsAttention(b)));
-  $("#p-totals").textContent = pipeFilter ? `showing ${shown.length} · click the tile again to clear` : "";
-  const cols = COLUMNS.map(([name, test]) => [name, shown.filter(test)]);
-  const empty = cols.filter(([, c]) => !c.length).map(([n]) => n);
-  $("#empties").textContent = empty.length && empty.length < cols.length ? `Empty: ${empty.join(" · ")}` : "";
-  const label = pipeFilter ? (tiles.find(t => t[0] === pipeFilter) || [])[2] : "";
-  $("#board").innerHTML = cols.every(([, c]) => !c.length) ? `<div class="empty">${pipeFilter ? `Nothing ${esc(label)} right now. <a href="#" id="clear-f">Show all</a>`
-      : "Nothing here. Adjust the search or period, or create a new execution."}</div>`
-    : cols.filter(([, c]) => c.length).map(([name, col]) => `<div class="col"><h4>${esc(name)} <b>${col.length}</b></h4>
-    ${col.slice(0, colLimit[name] || COL_PAGE).map(b => { const wf = b.workflow || {}, st = b.status || {};
-      return `<div class="pcard" data-go="${esc(b.correlationId)}"><div class="cid">${esc(b.correlationId)}</div>
-      <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}</div>
-      <div class="sub">${b.state === "CLOSED" && b.outcome ? chip(`${b.outcome.code ?? "—"} ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad")
-        : wf.stage ? `<span>${esc(wf.stage)} · ${esc(wf.state)}</span>` : ""}
-        ${isHitl(b) ? chip("needs HITL review", "s-warn") : ""}
-        ${b.closedBy && b.closedBy !== "callback" ? chip(`closed by ${b.closedBy}`, "s-warn") : ""}
-        ${b.callbackOverdue && b.state !== "CLOSED" ? chip("no callback", "s-bad") : ""}${isStale(b) ? chip(`no change ${STALE_H}h+`, "s-warn") : ""}
-        ${b.contractErrors ? chip(`${b.contractErrors} spec deviations`, "s-bad") : ""}</div>
-      ${b.aceUrl && b.aceUrl !== cfg.defaultAceUrl ? `<div class="sub mono">ACE ${esc(b.aceUrl)}</div>` : ""}
-      <div class="run">${runLine(b)}</div></div>`; }).join("")}
-    ${col.length > (colLimit[name] || COL_PAGE) ? `<button class="more" data-more="${esc(name)}">Show ${Math.min(COL_PAGE, col.length - (colLimit[name] || COL_PAGE))} more of ${col.length - (colLimit[name] || COL_PAGE)}</button>` : ""}
-    </div>`).join("");
+function controlChecks(cf, b) {
+  const li = (cf && cf.loanInfo) || {}, docs = (cf && Array.isArray(cf.documents) && cf.documents) || [], out = [];
+  const add = (ok, text) => out.push([ok, text]);
+  add(["loanId", "correlationId", "sellerLoanNumber", "loanAmount", "borrowerLastName"].every(k => String(li[k] ?? "").trim()), "loanInfo has loanId, correlationId, sellerLoanNumber, loanAmount and borrowerLastName");
+  add(li.loanId === b.loanId && li.correlationId === b.correlationId, "loanId and correlationId match the job's S3 folder");
+  add(["true", "false"].includes(cf && cf.extractionRequired), 'extractionRequired is the string "true" or "false"');
+  add(docs.length > 0, `documents lists ${docs.length} file${docs.length === 1 ? "" : "s"}`);
+  const names = new Set(b.documents.map(d => d.fileName));
+  add(docs.every(d => d && d.fileName && d.contentType && names.has(d.fileName)), "every listed document has a content type and is uploaded");
+  add(b.documents.every(d => docs.some(x => x && x.fileName === d.fileName)), "every uploaded document is listed");
+  return out;
 }
-$("#board").addEventListener("click", e => { const m = e.target.closest("[data-more]");
-  if (m) { colLimit[m.dataset.more] = (colLimit[m.dataset.more] || COL_PAGE) + COL_PAGE; return loadPipeline(); }
-  if (e.target.id === "clear-f") { e.preventDefault(); pipeFilter = ""; loadPipeline(); } });
-$("#stats").addEventListener("click", e => { const t = e.target.closest(".stat.click"); if (t) { pipeFilter = pipeFilter === t.dataset.f ? "" : t.dataset.f; loadPipeline(); } });
-$("#p-mine").addEventListener("change", loadPipeline);
-$("#p-csv").onclick = () => { location.href = BASE + `/api/export/executions.csv?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`; };
-$("#cb-csv").onclick = () => { location.href = BASE + "/api/export/callbacks.csv"; };
-function updateBadge(t, n) { const el = $("#bdg-" + t); el.textContent = n; el.hidden = !n; el.title = t === "pipe" ? "executions needing attention" : "callbacks with spec deviations or for unknown jobs"; }
-$("#board").addEventListener("click", e => { const c = e.target.closest("[data-go]"); if (c) { showTab("exec"); select(c.dataset.go); } });
-$("#p-q").addEventListener("input", () => { clearTimeout(loadPipeline.h); loadPipeline.h = setTimeout(loadPipeline, 300); });
-$("#p-days").addEventListener("change", loadPipeline);
-$("#p-new").onclick = () => $("#new").click();
-
-// ---------------------------------------------------------------- callbacks viewer
-let cbOpen = new Set();
-let cbOffset = 0;
-const CB_PAGE = 100;
-async function loadCallbacks() {
-  let page;
-  try { page = await api("GET", `/api/callbacks?filter=${$("#cb-filter").value}&q=${encodeURIComponent($("#cb-q").value.trim())}&offset=${cbOffset}&limit=${CB_PAGE}`); }
-  catch (e) { $("#cb-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  updateBadge("cb", page.attention);
-  const rows = page.items;
-  $("#cb-totals").textContent = `${page.total} deliveries match · ${page.attention} with spec deviations or for unknown jobs`;
-  $("#cb-table").innerHTML = (rows.length ? `<div style="overflow-x:auto"><table><tr><th>received</th><th>aceJobId</th><th>execution</th><th>#</th><th>our answer</th>
-    <th>outcome</th><th>result file</th><th>failed docs</th><th>spec</th></tr>
-    ${rows.map(c => { const p = c.payload || {}, s = p.status || {}, id = `${c.aceJobId}/${c.attempt}`;
-      return `<tr class="cb" data-cb="${esc(id)}"><td>${when(c.receivedAt)}</td><td class="mono">${esc(c.aceJobId)}</td>
-      <td class="mono">${c.correlationId ? `<a href="#" data-go="${esc(c.correlationId)}">${esc(c.correlationId)}</a>` : chip("unknown job", "s-warn")}</td>
-      <td>${c.attempt}</td><td>${chip(c.answeredWith, c.answeredWith === 200 ? "s-ok" : "s-warn")}</td><td>${chip(`${s.code} ${s.value}`, CODE_CLASS(s.code))}</td>
-      <td class="mono">${esc(p.batchPath || "—")}</td><td>${(p.failedDocuments || []).length || ""}</td>
-      <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} deviations`, "s-bad") : chip("ok", "s-ok")}</td></tr>
-      ${cbOpen.has(id) ? `<tr><td colspan="9"><pre>${J({payload: p, contractErrors: c.contractErrors, idempotencyKey: c.idempotencyKey, callerPrincipal: c.callerPrincipal, headers: c.headers})}</pre></td></tr>` : ""}`; }).join("")}
-    </table></div>` : `<div class="empty">No callbacks match.</div>`)
-    + (page.total > CB_PAGE ? `<div class="pager"><span>${page.offset + 1}–${page.offset + rows.length} of ${page.total}</span>
-      <span><button data-cbpage="-1" ${page.offset ? "" : "disabled"}>‹ Prev</button> <button data-cbpage="1" ${page.offset + rows.length < page.total ? "" : "disabled"}>Next ›</button></span></div>` : "");
+function wzControl() {
+  const b = wz.batch, base = `/api/batches/${encodeURIComponent(b.correlationId)}`, cf = b.controlOverride || b.controlPreview;
+  const checks = controlChecks(cf, b), bad = checks.filter(c => !c[0]).length;
+  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Control file</h2><p class="hint" style="margin:4px 0 14px">Generated from your loan details and the documents you added (spec 3.2).
+      It is written to S3 next to the documents when you continue.</p>
+    <div class="loc">${icon("file")}<span>s3://${esc(cfg.intakeBucket)}/${esc(b.folder)}${esc(b.controlFileName)}</span></div>
+    <div class="grid2" style="margin-top:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div>${wz.raw ? `<textarea id="w-json">${esc(JSON.stringify(cf, null, 2))}</textarea>` : `<pre class="json">${jsonHtml(cf)}</pre>`}
+        <div class="toolbar" style="margin-top:10px">${wz.raw ? `<button class="btn sm" id="w-use">Use my JSON</button><button class="btn sm ghost" id="w-gen">Back to the generated file</button>`
+          : `<button class="btn sm ghost" id="w-edit">Edit by hand (advanced, for negative tests)</button>`}<span class="spacer"></span>${b.controlOverride ? pill("hand-edited", "warn") : pill("generated", "ok")}</div></div>
+      <div><div style="font-weight:600;margin-bottom:8px">Checks against spec 3.2</div>
+        <ul class="checks">${checks.map(([ok, t]) => `<li><span class="${ok ? "y" : "n"}">${icon(ok ? "check" : "alert")}</span>${esc(t)}</li>`).join("")}</ul>
+        ${bad ? `<p class="hint" style="color:var(--warn);margin-top:10px">${bad} check${bad > 1 ? "s" : ""} not met. Fine for a negative test; otherwise go back and fix it.</p>` : `<p class="okline" style="margin-top:10px">Ready to write.</p>`}</div></div>`;
+  if ($("#w-edit")) $("#w-edit").onclick = () => { wz.raw = true; wzControl(); };
+  if ($("#w-gen")) $("#w-gen").onclick = e => act(e.currentTarget, () => api("PUT", base + "/control", {controlOverride: null})).then(async r => { if (r) { wz.raw = false; await wzReload(); drawWizard(); } });
+  if ($("#w-use")) $("#w-use").onclick = e => { let v; try { v = JSON.parse($("#w-json").value); } catch (err) { return toast("JSON: " + err.message, true); }
+    act(e.currentTarget, () => api("PUT", base + "/control", {controlOverride: v}), "Hand-edited control file saved").then(async r => { if (r) { await wzReload(); drawWizard(); } }); };
+  wzFoot("Write the control file to S3", async btn => {
+    if (wz.raw) { let v; try { v = JSON.parse($("#w-json").value); } catch (err) { return toast("JSON: " + err.message, true); }
+      if (!await act(btn, () => api("PUT", base + "/control", {controlOverride: v}))) return; }
+    if (!await act(btn, () => api("POST", base + "/stage"), "Control file written to S3")) return;
+    await wzReload(); wz.step = 3; drawWizard();
+  }, {icon: "upload"});
 }
-$("#cb-table").addEventListener("click", e => {
-  const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); return select(a.dataset.go); }
-  const pg = e.target.closest("[data-cbpage]"); if (pg) { cbOffset = Math.max(0, cbOffset + CB_PAGE * +pg.dataset.cbpage); return loadCallbacks(); }
-  const r = e.target.closest("[data-cb]"); if (r) { const id = r.dataset.cb; cbOpen.has(id) ? cbOpen.delete(id) : cbOpen.add(id); loadCallbacks(); }
-});
-$("#cb-filter").addEventListener("change", () => { cbOffset = 0; loadCallbacks(); });
-$("#cb-q").addEventListener("input", () => { clearTimeout(loadCallbacks.h); loadCallbacks.h = setTimeout(() => { cbOffset = 0; loadCallbacks(); }, 300); });
+async function wzFolder() {
+  const b = wz.batch;
+  $("#wz-body").innerHTML = `<div class="empty">Reading the S3 folder…</div>`;
+  wzFoot("Continue to submit", () => { wz.step = 4; drawWizard(); });
+  let f; try { f = await api("GET", `/api/batches/${encodeURIComponent(b.correlationId)}/folders`); } catch (e) { $("#wz-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const issues = b.controlIssues || [];
+  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Check the S3 folder</h2><p class="hint" style="margin:4px 0 14px">This is exactly what ACE will read: the objects in the job's folder, as S3 lists them now.</p>
+    <div class="loc">${icon("folder")}<span>${esc(f.input.location)}</span><button class="btn sm ghost" data-copy="${esc(f.input.location)}">${icon("copy")}</button></div>
+    <div class="card" style="margin-top:12px;box-shadow:none">${folderTable(b.correlationId, "input", f.input.objects)}</div>
+    ${f.input.missing.length ? `<ul class="errs">${f.input.missing.map(n => `<li>${esc(n)} is listed in the control file but not in the folder</li>`).join("")}</ul>` : ""}
+    ${issues.length ? `<div class="status-card warn" style="margin:14px 0 0"><div class="sc-top"><div class="sc-icon">${icon("alert")}</div><div><div class="sc-title" style="font-size:15px">The package does not fully meet spec 3.2</div>
+      <ul class="errs" style="color:var(--ink-2)">${issues.map(i => `<li>${esc(i)}</li>`).join("")}</ul><div class="hint" style="margin-top:6px">Go back to fix it, or continue if this is a negative test.</div></div></div></div>`
+      : `<p class="okline" style="margin-top:12px">${icon("ok")} The folder matches the control file.</p>`}`;
+  $$("#wz-body [data-view]").forEach(x => x.onclick = () => { const [area, name] = x.dataset.view.split("|"); viewObject(b.correlationId, area, name); });
+  bindCopy();
+}
+function wzSubmit() {
+  const b = wz.batch, rejected = b.state === "REJECTED", ev = (b.events || []).filter(e => e.type === "rejected").pop();
+  const preview = mode => ({loanId: b.loanId, correlationId: b.correlationId, batchPath: mode === "folder" ? b.folder : b.folder + b.controlFileName});
+  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Submit to ACE</h2><p class="hint" style="margin:4px 0 16px">The console calls ACE's onboarding API (spec 4). ACE answers with an ACE job ID and
+      then works in the background; the job page follows it stage by stage.</p>
+    ${rejected ? `<div class="status-card bad" style="margin-bottom:16px"><div class="sc-top"><div class="sc-icon">${icon("alert")}</div><div><div class="sc-title" style="font-size:15px">ACE refused the last attempt</div>
+      <div class="sc-sub">${esc(ev ? ev.message : "")} ${esc(JSON.stringify(((ev || {}).data || {}).response || ""))}</div></div></div></div>` : ""}
+    <div class="form-grid">
+      <label class="field" style="grid-column:1/-1"><span>ACE endpoint</span><input id="s-ace" value="${esc(cfg.defaultAceUrl || "")}"><small>The default endpoint; change it for this job only</small></label>
+      <label class="field"><span>Point ACE at (batchPath)</span><select id="s-mode"><option value="file">the control file</option><option value="folder">the folder</option></select></label>
+      <label class="field"><span>Simulate an eOCR outage</span><select id="s-flaky"><option value="0">No: accept the first callback</option><option value="1">Refuse the first callback (503)</option>
+        <option value="2">Refuse the first 2 callbacks</option><option value="3">Refuse the first 3 callbacks</option></select><small>Proves ACE retries its callback</small></label>
+    </div>
+    <div style="font-weight:600;margin:16px 0 6px">Request that will be sent</div><pre class="json" id="s-req">${jsonHtml(preview("file"))}</pre>`;
+  $("#s-mode").onchange = e => $("#s-req").innerHTML = jsonHtml(preview(e.target.value));
+  wzFoot(rejected ? "Submit again" : "Submit to ACE", async btn => {
+    const r = await act(btn, () => api("POST", `/api/batches/${encodeURIComponent(b.correlationId)}/submit`, {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}));
+    if (!r) return;
+    toast(r.state === "REJECTED" ? "ACE refused the submission. The job page explains why." : `Accepted by ACE: ${r.aceJobId}`, r.state === "REJECTED");
+    location.hash = `#/job/${encodeURIComponent(b.correlationId)}`;
+  }, {big: true, icon: "send"});
+}
 
-// ---------------------------------------------------------------- default ACE endpoint
+// ================================================================== job page
+const TABS = [["overview", "Overview"], ["files", "Files in S3"], ["result", "Result"], ["validation", "Validation"], ["callbacks", "Callbacks"], ["spec", "Spec compliance"], ["activity", "Activity"]];
+let job = null;
+async function pageJob(cid, tab) {
+  if (!job || job.correlationId !== cid) main().innerHTML = `<div class="empty">Loading…</div>`;
+  const load = async first => {
+    let b; try { b = await api("GET", "/api/batches/" + encodeURIComponent(cid)); } catch (e) { main().innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const sig = x => x && [x.correlationId, x.state, x.updatedAt, (x.events || []).length, (x.callbacks || []).length].join("|");  // updatedAt alone has 1 s resolution
+    const changed = sig(job) !== sig(b);
+    job = b; if (first || changed) drawJob(tab);
+  };
+  await load(true);
+  every(5000, () => { if (job && job.state !== "CLOSED" && !$("#tab details[open]")) load(false); });
+}
+function drawJob(tab) {
+  const b = job, s = statusOf(b), ex = b.explain || {}, cid = encodeURIComponent(b.correlationId);
+  const counts = {spec: (b.specChecklist || []).filter(r => r.result === "failed").reduce((a, r) => a + r.errors.length, 0),
+    validation: ((b.validation || {}).findings || []).length, callbacks: (b.callbacks || []).filter(c => c.contractErrors.length).length};
+  const setup = ["DRAFT", "STAGED", "REJECTED"].includes(b.state);
+  main().innerHTML = `<div class="crumbs"><a href="#/jobs">Jobs</a> / ${esc(b.correlationId)}</div>
+    <div class="job-head"><h1>Loan ${esc(b.loanId)}</h1>${pill(s.label, s.tone, "big")}
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+        ${setup ? `<a class="btn primary" href="#/job/${cid}/setup">${icon("arrow")}${b.state === "REJECTED" ? "Fix and submit again" : "Continue setup"}</a>` : ""}
+        ${b.aceJobId && b.state !== "CLOSED" ? `<button class="btn" id="a-refresh">${icon("refresh")}Check ACE now</button>` : ""}
+        ${b.documents.length && !setup ? `<button class="btn" id="a-resubmit" title="Same documents and loan data, new correlationId">${icon("copy")}Resubmit as new job</button>` : ""}
+        ${b.state !== "CLOSED" ? `<button class="btn danger" id="a-close">${icon("x")}Close…</button>` : ""}</div></div>
+    <div class="facts"><span>Job <b class="mono">${esc(b.correlationId)}</b></span><span>ACE job <b class="mono">${esc(b.aceJobId || "—")}</b></span>
+      <span>${whoLine(b)}</span>${b.submittedAt ? `<span>${b.closedAt ? "Took" : "Running for"} <b>${took(b)}</b></span>` : ""}
+      ${b.aceUrl ? `<span>ACE <b class="mono">${esc(b.aceUrl)}</b></span>` : ""}
+      ${b.resubmissionOf ? `<span>Resubmission of <a href="#/job/${encodeURIComponent(b.resubmissionOf)}">${esc(b.resubmissionOf)}</a></span>` : ""}</div>
+    ${statusCard(b, ex)}
+    <div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Where the job is</h3><span class="sub">eOCR steps and the stages ACE reports, with times and durations</span>
+      <span class="right"><span class="tag eocr">eOCR</span><span class="tag ace">ACE</span></span></div><div class="track">${trackHtml(b.stageTrack || [])}</div></div>
+    <div class="tabs">${TABS.map(([k, l]) => `<a href="#/job/${cid}/${k}" class="${k === tab ? "on" : ""}">${l}${counts[k] ? `<span class="n">${counts[k]}</span>` : ""}</a>`).join("")}</div>
+    <div id="tab"></div>`;
+  ({overview: tabOverview, files: tabFiles, result: tabResult, validation: tabValidation, callbacks: tabCallbacks, spec: tabSpec, activity: tabActivity}[tab] || tabOverview)(b);
+  wireJob(b);
+}
+function trackHtml(steps) {
+  return steps.map(st => `<div class="st ${st.status}"><span class="sd"><span class="tag ${st.side === "ACE" ? "ace" : "eocr"}" style="font-size:9.5px">${esc(st.side)}</span></span>
+    <span class="dot">${st.status === "done" ? icon("check") : st.status === "failed" ? icon("x") : ""}</span>
+    <div class="lbl">${esc(st.label)}</div><div class="when">${st.at ? `<time title="${esc(new Date(st.at).toString())}">${esc(TIME.format(new Date(st.at)))}</time>` : {upcoming: "upcoming", current: "in progress", waiting: "waiting"}[st.status] || ""}</div>
+    <div class="note">${esc((st.note || "").replace(/[A-Z]+(?:_[A-Z]+)+|\b[A-Z]{4,}\b/g, m => m.toLowerCase().replace(/_/g, " ")))}${st.seconds != null && st.status !== "upcoming" ? `${st.note ? " · " : ""}${dur(st.seconds)}` : ""}</div></div>`).join("");
+}
+function statusCard(b, ex) {
+  const tone = ex.tone || "info", ic = {ok: "ok", bad: "alert", warn: "alert", info: "clock", idle: "info"}[tone];
+  const actions = [];
+  if (OPEN(b) && wfOf(b).state === "HITL_PENDING") actions.push(`<button class="btn primary" id="x-hitl">Open the HITL review</button>`);
+  if (OPEN(b) && b.callbackOverdue) actions.push(`<button class="btn primary" id="x-reconcile">Close from the Status API</button>`);
+  if (b.state === "CLOSED" && tone !== "ok" && b.documents.length) actions.push(`<button class="btn primary" id="x-resubmit">${icon("copy")}Resubmit as new job</button>`);
+  if (["DRAFT", "STAGED", "REJECTED"].includes(b.state)) actions.push(`<a class="btn primary" href="#/job/${encodeURIComponent(b.correlationId)}/setup">${b.state === "REJECTED" ? "Fix and submit again" : "Continue setup"}</a>`);
+  if ((b.state === "CLOSED" || b.state === "REJECTED") && tone !== "ok") actions.push(`<button class="btn" id="x-copy">${icon("copy")}Copy the failure summary</button>`);
+  const body = (ex.items || []).length || (ex.next || []).length || actions.length || (ex.packageIssues || []).length || (ex.deviations || []).length;
+  return `<section class="status-card ${tone}"><div class="sc-top"><div class="sc-icon">${icon(ic)}</div>
+      <div class="sc-text"><div class="sc-title">${esc(ex.headline || statusOf(b).label)}</div>${ex.summary ? `<div class="sc-sub">${esc(ex.summary)}</div>` : ""}</div>
+      ${ex.stage ? `<div class="sc-where">${tone === "bad" ? "Failed at" : "Now at"}: ${esc(ex.stage)}</div>` : ""}</div>
+    ${body ? `<div class="sc-body">
+      ${(ex.items || []).length ? `<div class="tbl"><table><tr><th>What</th><th>Problem</th><th>How to fix it</th></tr>${ex.items.map(i => `<tr><td class="mono">${esc(i.subject)}</td>
+        <td style="color:var(--bad);font-weight:600">${esc(i.problem)}</td><td>${esc(i.fix || "")}</td></tr>`).join("")}</table></div>` : ""}
+      ${(ex.packageIssues || []).length ? `<div><b>The package did not meet spec 3.2</b> <span class="hint">(intended if this was a negative test)</span>
+        <ul class="errs">${ex.packageIssues.map(e => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+      ${(ex.next || []).length ? `<div><b>What to do next</b><ol class="sc-next">${ex.next.map(n => `<li>${esc(n)}</li>`).join("")}</ol></div>` : ""}
+      ${(ex.deviations || []).length ? `<details><summary style="color:var(--ink-2);font-weight:600">ACE did not follow the spec in ${ex.deviations.reduce((a, d) => a + d.errors.length, 0)} place(s)</summary>
+        ${ex.deviations.map(d => `<div style="margin-top:8px"><span class="mono">${esc(d.clause)}</span> ${esc(d.check)}<ul class="errs">${d.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul></div>`).join("")}</details>` : ""}
+      ${actions.length ? `<div class="sc-actions">${actions.join("")}</div>` : ""}</div>` : ""}</section>`;
+}
+function failureText(b) {
+  const ex = b.explain || {};
+  return [`${ex.headline} — loan ${b.loanId}, job ${b.correlationId}, ACE job ${b.aceJobId || "-"}`, ex.summary, ex.stage ? `Stage: ${ex.stage}` : "",
+    ...(ex.items || []).map(i => `- ${i.subject}: ${i.problem}${i.fix ? ` (fix: ${i.fix})` : ""}`),
+    ...(ex.deviations || []).flatMap(d => d.errors.map(e => `- spec ${d.clause}: ${e}`)),
+    `Submitted ${b.submittedAt || "-"} by ${b.submittedBy || "-"}; closed ${b.closedAt || "-"}`].filter(Boolean).join("\n");
+}
+const currentTab = () => (location.hash.split("?")[0].split("/")[3] || "overview");
+function wireJob(b) {
+  const base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
+  const reload = async () => { job = await api("GET", base); drawJob(currentTab()); };
+  const on = (id, fn) => { const el = $(id); if (el) el.onclick = fn; };
+  on("#a-refresh", e => act(e.currentTarget, () => api("POST", base + "/refresh"), "Asked ACE for the latest status").then(r => r && reload()));
+  const resub = e => act(e.currentTarget, () => api("POST", base + "/resubmit"), "New job created with the same package").then(r => r && (location.hash = `#/job/${encodeURIComponent(r.correlationId)}/setup`));
+  on("#a-resubmit", resub); on("#x-resubmit", resub);
+  on("#a-close", () => { $("#c-note").value = ""; $("#dlg-close").showModal(); });
+  on("#x-reconcile", () => { $("#c-note").value = "no callback from ACE"; $("#dlg-close").showModal(); });
+  on("#x-copy", () => navigator.clipboard.writeText(failureText(b)).then(() => toast("Failure summary copied"), () => toast("Copy failed", true)));
+  on("#x-hitl", () => openHitl(b));
+  $("#c-ok").onclick = e => act(e.currentTarget, () => api("POST", base + "/close", {note: $("#c-note").value}), "Job closed").then(r => { $("#dlg-close").close(); if (r) reload(); });
+  bindCopy();
+}
+
+function tabOverview(b) {
+  const cf = b.controlFile || b.controlPreview || {}, li = cf.loanInfo || {}, sm = (b.result || {}).summary, v = b.validation || {};
+  const applicable = (b.specChecklist || []).filter(x => x.result !== "n/a");
+  $("#tab").innerHTML = `<div class="grid2">
+    <div class="card"><div class="card-h"><h3>What was sent</h3><a class="right" href="#/job/${encodeURIComponent(b.correlationId)}/files">Files in S3</a></div><div class="card-b">
+      <dl class="kv"><dt>Loan ID</dt><dd><b>${esc(li.loanId || b.loanId)}</b></dd><dt>Seller loan number</dt><dd class="mono">${esc(li.sellerLoanNumber)}</dd>
+        <dt>Loan amount</dt><dd class="mono">${esc(li.loanAmount)}</dd><dt>Borrower last name</dt><dd class="mono">${esc(li.borrowerLastName)}</dd>
+        <dt>Extraction</dt><dd>${esc(cf.extractionRequired)} ${cf.extractionRequired === "true" ? "(whole package)" : cf.extractionRequired === "false" ? "(classification only)" : ""}</dd>
+        <dt>Documents</dt><dd>${(cf.documents || []).map(d => `<div class="mono">${esc(d.fileName)}</div>`).join("") || "—"}</dd>
+        <dt>batchPath</dt><dd class="mono">${esc(b.batchPath || "—")}</dd></dl></div></div>
+    <div class="card"><div class="card-h"><h3>What came back</h3></div><div class="card-b">
+      <div class="stat-grid">
+        <div class="stat"><div class="v">${b.outcome ? esc(b.outcome.code ?? "—") : "—"}</div><div class="l">${esc(b.outcome ? b.outcome.value : "outcome pending")}</div></div>
+        <div class="stat"><div class="v">${sm ? sm.documents : "—"}</div><div class="l">documents classified${sm ? ` in ${sm.documentTypes} types` : ""}</div></div>
+        <div class="stat"><div class="v">${sm ? sm.extractedFields : "—"}</div><div class="l">fields extracted</div></div>
+        <div class="stat"><div class="v">${esc(v.validationStatus || "—")}</div><div class="l">NOTE validation</div></div>
+        <div class="stat"><div class="v">${(b.callbacks || []).length}</div><div class="l">callback deliveries</div></div>
+        <div class="stat"><div class="v">${applicable.filter(x => x.result === "passed").length}/${applicable.length}</div><div class="l">spec checks passed</div></div>
+      </div>
+      ${(b.outcome || {}).description ? `<p style="margin:14px 0 0"><span class="hint">ACE said:</span> ${esc(b.outcome.description)}</p>` : ""}</div></div></div>`;
+}
+function folderTable(cid, area, objects) {
+  if (!objects.length) return `<div class="empty">Empty.</div>`;
+  const tone = r => r === "control file" ? "info" : r === "document" || r === "result file (batchPath)" ? "ok" : r === "not in control file" ? "warn" : "idle";
+  const recRole = n => n.startsWith("submission") ? "submission record" : n === "outcome.json" ? "outcome record" : "Response.json copy";
+  return `<div class="tbl"><table><tr><th>Name</th><th>What it is</th><th>Size</th><th>${area === "records" ? "Stored" : "Last modified"}</th><th></th></tr>
+    ${objects.map(o => { const viewable = /\.(json|pdf|png|jpe?g|tiff?|txt)$/i.test(o.name), role = o.role || (area === "records" ? recRole(o.name) : "");
+      return `<tr><td class="mono">${icon("file")} ${esc(o.name)}</td><td>${role ? pill(role, tone(role), "nodot") : ""}</td>
+      <td>${bytes(o.bytes)}</td><td>${when(o.modified || o.storedAt)}</td>
+      <td style="white-space:nowrap">${viewable ? `<button class="btn sm ghost" data-view="${esc(area)}|${esc(o.name)}" title="View">${icon("eye")}</button>` : ""}
+        <a class="btn sm ghost" href="${objUrl(cid, area, o.name)}" title="Download">${icon("download")}</a></td></tr>`; }).join("")}</table></div>`;
+}
+async function tabFiles(b) {
+  $("#tab").innerHTML = `<div class="empty">Reading S3…</div>`;
+  let f; try { f = await api("GET", `/api/batches/${encodeURIComponent(b.correlationId)}/folders`); } catch (e) { $("#tab").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const sec = (title, sub, loc, area, objs, extra = "") => `<div class="card"><div class="card-h">${icon("folder")}<h3>${title}</h3><span class="sub">${sub}</span>
+      <span class="right hint">${loc ? `${objs.length} object${objs.length === 1 ? "" : "s"}` : ""}</span></div>
+    ${loc ? `<div class="card-b" style="padding-bottom:0"><div class="loc">${esc(loc)}<button class="btn sm ghost" data-copy="${esc(loc)}">${icon("copy")}</button></div>${extra}</div>
+      <div style="margin-top:12px">${folderTable(b.correlationId, area, objs)}</div>` : `<div class="empty">ACE has not accepted the job yet.</div>`}</div>`;
+  $("#tab").innerHTML = `<div class="stack">
+    ${sec("Input: what eOCR staged", "intake bucket, read by ACE", f.input.location, "input", f.input.objects,
+      f.input.missing.length ? `<ul class="errs">${f.input.missing.map(n => `<li>${esc(n)} is listed in the control file but not in the folder</li>`).join("")}</ul>` : "")}
+    ${sec("Output: what ACE wrote", "output bucket; the callback names the result file", f.output.location, "output", f.output.objects)}
+    ${sec("Simulator records", "kept after the job: submission, outcome, a copy of the result", f.records.location, "records", f.records.objects)}</div>`;
+  $$("#tab [data-view]").forEach(x => x.onclick = () => { const [area, name] = x.dataset.view.split("|"); viewObject(b.correlationId, area, name); });
+  bindCopy();
+}
+async function viewObject(cid, area, name) {
+  const url = objUrl(cid, area, name, true);
+  if (!/\.(json|txt)$/i.test(name)) { window.open(url, "_blank", "noopener"); return; }
+  const r = await fetch(url, {credentials: "same-origin"}), text = await r.text();
+  let body = text; try { body = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* plain text */ }
+  $("#v-title").textContent = name; $("#v-body").textContent = r.ok ? body : `Could not read it: HTTP ${r.status} ${text}`; $("#v-dl").href = objUrl(cid, area, name); $("#dlg-view").showModal();
+}
+function tabResult(b) {
+  const o = b.outcome, r = b.result || {}, s = r.summary;
+  if (!o) { $("#tab").innerHTML = `<div class="card"><div class="empty">The result appears here when ACE has finished and called back.</div></div>`; return; }
+  $("#tab").innerHTML = `<div class="stack"><div class="card"><div class="card-h"><h3>Outcome</h3>${pill(`${o.code ?? "—"} ${o.value}`, statusOf(b).tone)}</div><div class="card-b">
+      <dl class="kv"><dt>ACE said</dt><dd>${esc(o.description || "(empty)")}</dd><dt>Closed</dt><dd>${when(b.closedAt, true)} ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " (" + esc(b.closedByUser) + ")" : ""}</dd>
+        <dt>Result file</dt><dd class="mono">${esc(o.batchPath || "none for this outcome")}</dd>
+        ${(o.failedDocuments || []).length ? `<dt>Failed documents</dt><dd>${o.failedDocuments.map(f => `<div><span class="mono">${esc(f.documentName)}</span>: <b style="color:var(--bad)">${esc(f.reason)}</b></div>`).join("")}</dd>` : ""}
+        ${r.key ? `<dt>Checked</dt><dd>${r.ok ? pill("matches spec 6.4 / 6.5", "ok") : pill(`${r.errors.length} problem(s)`, "bad")}</dd>` : ""}</dl>
+      ${r.errors && r.errors.length ? `<ul class="errs">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</div></div>
+    ${s ? `<div class="card"><div class="card-h"><h3>Documents ACE found</h3><span class="sub">validationStatus ${esc(s.validationStatus)} · ${s.documentTypes} types · ${s.documents} documents · ${s.extractedFields} fields</span>
+      <span class="right"><button class="btn sm" id="r-raw">${icon("eye")}Raw Response.json</button></span></div>
+      <div class="tbl"><table><tr><th>Document type</th><th>File</th><th>Pages</th><th>Name</th><th>Extracted fields</th></tr>
+      ${s.rows.map(x => `<tr><td><b>${esc(x.documentType)}</b></td><td class="mono">${esc(x.fileName)}</td><td class="mono">${esc(x.pageRange)}</td>
+        <td>${esc(x.docTypeName || x.docTypeId)}${x.duplicatePagesOf ? " " + pill(`duplicate of ${x.duplicatePagesOf}`, "warn") : ""}</td>
+        <td>${Object.entries(x.fields || {}).map(([k, v]) => `<div><span class="mono hint">${esc(k)}</span> ${esc(v)}</div>`).join("") || `<span class="hint">none</span>`}</td></tr>`).join("")}</table></div></div>` : ""}</div>`;
+  if ($("#r-raw")) $("#r-raw").onclick = () => api("GET", `/api/batches/${encodeURIComponent(b.correlationId)}/response`).then(j => {
+    $("#v-title").textContent = "Response.json"; $("#v-body").textContent = JSON.stringify(j, null, 2); $("#v-dl").removeAttribute("href"); $("#dlg-view").showModal(); }, e => toast(e.message, true));
+}
+function tabValidation(b) {
+  const v = b.validation;
+  if (!v || !b.aceJobId) { $("#tab").innerHTML = `<div class="card"><div class="empty">Validation appears once ACE has the job.</div></div>`; return; }
+  const mark = x => x === "match" ? pill("match", "ok") : x === "mismatch" ? pill("mismatch", "bad") : `<span class="hint">—</span>`;
+  const hitl = f => f.hitlDecision === true ? pill("confirmed match", "ok") : f.hitlDecision === false ? pill("confirmed mismatch", "bad") : f.hitlExtracted != null ? `<span class="mono">${esc(f.hitlExtracted)}</span>` : "—";
+  $("#tab").innerHTML = `<div class="stack">
+    <div class="card"><div class="card-h"><h3>NOTE validation</h3>${v.validationStatus ? pill(v.validationStatus, v.validationStatus === "PASSED" ? "ok" : v.validationStatus === "FAILED" ? "bad" : "idle")
+        : pill(v.stoppedAt ? "did not run" : b.state === "CLOSED" ? "not reported" : "pending", "idle")}<span class="sub">the control file against what ACE read on the NOTE</span></div>
+      ${v.stoppedAt ? `<div class="card-b hint">ACE stopped before validation (${esc(v.stoppedAt)}), so the loan data was not compared.</div>` : ""}
+      <div class="tbl"><table><tr><th>Field</th><th>Control file</th><th>Found by ACE</th><th>Simulator's check</th><th>ACE's verdict</th><th>HITL reviewer</th></tr>
+      ${v.fields.map(f => `<tr><td><b>${esc(f.label)}</b></td><td class="mono">${esc(f.control)}</td><td>${f.extracted != null ? `<span class="mono">${esc(f.extracted)}</span> <span class="hint">${esc(f.source || "")}</span>` : "—"}</td>
+        <td>${mark(f.ours)}</td><td>${mark(f.ace)}</td><td>${hitl(f)}</td></tr>`).join("")}</table></div>
+      ${v.findings.length ? `<div class="card-b"><b style="color:var(--bad)">Findings</b><ul class="errs">${v.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul></div>` : ""}</div>
+    <div class="card"><div class="card-h"><h3>Document checks</h3><span class="sub">what ACE did with each file</span></div>
+      <div class="tbl"><table><tr><th>Document</th><th>Size</th><th>Pre-check</th><th>Classified as</th><th>Pages</th><th>Fields</th></tr>
+      ${v.documents.map(d => `<tr><td class="mono">${esc(d.fileName)}${d.note ? `<div style="color:var(--warn);font-size:12px">${esc(d.note)}</div>` : ""}</td><td>${bytes(d.bytes)}</td>
+        <td>${d.precheck == null ? "—" : d.precheck === "passed" ? pill("passed", "ok") : d.precheck.startsWith("failed") ? pill(d.precheck, "bad") : `<span class="hint">${esc(d.precheck)}</span>`}</td>
+        <td>${d.types.map(esc).join(", ") || "—"}</td><td class="mono">${esc(d.pages || "—")}</td><td>${d.types.length ? d.extractedFields : "—"}</td></tr>`).join("")}</table></div></div></div>`;
+}
+function tabCallbacks(b) {
+  const cbs = b.callbacks || [];
+  $("#tab").innerHTML = `<div class="card"><div class="card-h"><h3>Callbacks from ACE</h3><span class="sub">every delivery attempt, and what the eOCR endpoint answered</span></div>
+    ${cbs.length ? `<div class="tbl"><table><tr><th>#</th><th>Received</th><th>Our answer</th><th>Outcome</th><th>Sent by</th><th>Idempotency-Key</th><th>Spec</th></tr>
+      ${cbs.map(c => { const s = (c.payload || {}).status || {}; return `<tr><td>${c.attempt}</td><td>${when(c.receivedAt)}</td>
+        <td>${pill(c.answeredWith, c.answeredWith === 200 ? "ok" : "warn")}</td><td>${pill(`${s.code} ${s.value}`, s.code === 0 ? "ok" : "bad")}</td>
+        <td class="mono" style="font-size:12px">${esc((c.callerPrincipal || "unsigned").split("/").slice(-2, -1)[0] || c.callerPrincipal || "unsigned")}</td>
+        <td class="mono" style="font-size:12px">${esc(c.idempotencyKey || "—")}</td><td>${c.contractErrors.length ? pill(`${c.contractErrors.length} deviations`, "bad") : pill("ok", "ok")}</td></tr>
+        <tr><td></td><td colspan="6"><details><summary>payload, headers and checks</summary><pre style="margin-top:8px">${esc(JSON.stringify({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers}, null, 2))}</pre></details></td></tr>`; }).join("")}</table></div>`
+      : `<div class="empty">${b.aceJobId ? "ACE has not called back yet." : "The job has not been submitted."}</div>`}</div>`;
+}
+function tabSpec(b) {
+  const rows = b.specChecklist || [];
+  const res = r => r.result === "passed" ? pill("passed", "ok") : r.result === "failed" ? pill(`failed · ${r.errors.length}`, "bad") : r.result === "pending" ? pill(r.note || "pending", "idle") : `<span class="hint">n/a</span>`;
+  $("#tab").innerHTML = `<div class="card"><div class="card-h"><h3>Spec compliance</h3><span class="sub">ACE to eOCR Integration Specification v1.1, clause by clause. 3.1 and 3.2 are eOCR's side.</span></div>
+    <div class="tbl"><table><tr><th style="width:130px">Spec</th><th>Check</th><th style="width:170px">Result</th></tr>
+    ${rows.map(r => `<tr><td class="mono">${esc(r.clause)}</td><td>${esc(r.check)}${r.errors.length ? `<ul class="errs">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</td><td>${res(r)}</td></tr>`).join("")}</table></div></div>`;
+}
+function tabActivity(b) {
+  const evs = [...(b.events || [])].reverse();
+  const tone = t => ({"contract-error": "bad", rejected: "bad", error: "bad", "validation-finding": "bad", warning: "warn", "callback-refused": "warn", hitl: "warn", closed: "ok", callback: "ok", result: "info", submitted: "info"}[t] || "idle");
+  $("#tab").innerHTML = `<div class="grid2">
+    <div class="card"><div class="card-h"><h3>ACE status history</h3><span class="sub">each change the Status API reported</span></div>
+      ${(b.stages || []).length ? `<div class="tbl"><table><tr><th>First seen</th><th>Stage · state</th><th>Status</th></tr>${b.stages.map(s => `<tr><td>${when(s.at)}</td>
+        <td>${esc(s.key[0] || "—")} · ${esc(s.key[1] || "—")}</td><td>${pill(`${s.key[2]} ${s.value}`, s.key[2] === 0 ? "ok" : [1000, 2000, 3000].includes(s.key[2]) ? "bad" : "info")}</td></tr>`).join("")}</table></div>`
+        : `<div class="empty">No status yet.</div>`}</div>
+    <div class="card"><div class="card-h"><h3>Activity</h3><span class="sub">${evs.length} events, newest first</span></div><div class="card-b" style="max-height:640px;overflow:auto">
+      ${evs.map(e => `<div class="ev"><div class="t">${when(e.at)}${pill(e.type, tone(e.type), "nodot")}</div>
+        <div>${esc(e.message)}${e.by ? ` <span class="hint">— ${esc(e.by)}</span>` : ""}${e.data ? `<details><summary>details</summary><pre style="margin-top:6px">${esc(JSON.stringify(e.data, null, 2))}</pre></details>` : ""}</div></div>`).join("")}</div></div></div>`;
+}
+async function openHitl(b) {
+  const base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
+  const r = await act(null, () => api("GET", base + "/hitl")); if (!r) return;
+  const fields = ((r.review || {}).fieldDetails) || [];
+  $("#hitl-body").innerHTML = fields.length ? `<div class="tbl"><table><tr><th>Field</th><th>Control file</th><th>On the NOTE</th><th>Matches?</th></tr>
+    ${fields.map((f, i) => `<tr><td><b>${esc(f.fieldName)}</b></td><td class="mono">${esc(f.metadataValue)}</td><td class="mono">${esc(f.extractedValue)}</td>
+      <td><label class="switch"><input type="checkbox" data-hf="${i}" ${f.isMatched !== false ? "checked" : ""}><span>match</span></label></td></tr>`).join("")}</table></div>`
+    : `<div class="empty">ACE returned no fields to review (HTTP ${r.httpStatus}).</div>`;
+  $("#hitl-send").onclick = e => act(e.currentTarget, () => api("POST", base + "/hitl", {fields: fields.map((f, i) => ({fieldName: f.fieldName, metadataValue: f.metadataValue,
+    extractedValue: f.extractedValue, isMatched: $(`[data-hf="${i}"]`).checked}))}), "Decision sent to ACE").then(x => { if (x) { $("#dlg-hitl").close(); pageJob(b.correlationId, currentTab()); } });
+  $("#dlg-hitl").showModal();
+}
+
+// ================================================================== callbacks and scenario runs
+let cbState = {filter: "", q: "", offset: 0};
+async function pageCallbacks() {
+  main().innerHTML = `<div class="page-head"><div><h1>Callbacks</h1><div class="sub">Every delivery ACE made to the eOCR callback endpoint, across all jobs</div></div>
+    <div class="actions"><button class="btn" id="cb-csv">${icon("download")}Export CSV</button></div></div>
+    <div class="toolbar"><div class="seg" id="cb-seg">${[["", "All"], ["accepted", "Accepted"], ["refused", "Refused"], ["errors", "Off-spec"], ["unknown", "Unknown job"]]
+      .map(([k, l]) => `<button data-f="${k}" class="${cbState.filter === k ? "on" : ""}">${l}</button>`).join("")}</div><span class="spacer"></span>
+      <input type="search" id="cb-q" placeholder="ACE job or job ID" value="${esc(cbState.q)}"></div><div class="card" id="cb-body"><div class="empty">Loading…</div></div>`;
+  $("#cb-seg").onclick = e => { const x = e.target.closest("button"); if (!x) return; cbState.filter = x.dataset.f; cbState.offset = 0; $$("#cb-seg button").forEach(y => y.classList.toggle("on", y === x)); drawCallbacks(); };
+  $("#cb-q").oninput = e => { cbState.q = e.target.value; clearTimeout(pageCallbacks.h); pageCallbacks.h = setTimeout(() => { cbState.offset = 0; drawCallbacks(); }, 300); };
+  $("#cb-csv").onclick = () => location.href = BASE + "/api/export/callbacks.csv";
+  await drawCallbacks(); every(15000, () => { if (!$("#cb-body details[open]")) drawCallbacks(); });
+}
+async function drawCallbacks() {
+  const PAGE = 50; let page;
+  try { page = await api("GET", `/api/callbacks?filter=${cbState.filter}&q=${encodeURIComponent(cbState.q)}&offset=${cbState.offset}&limit=${PAGE}`); }
+  catch (e) { $("#cb-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  setCount("#n-cb", page.attention);
+  $("#cb-body").innerHTML = page.items.length ? `<div class="tbl"><table><tr><th>Received</th><th>Job</th><th>#</th><th>Our answer</th><th>Outcome</th><th>Result file</th><th>Spec</th></tr>
+    ${page.items.map(c => { const p = c.payload || {}, s = p.status || {}; return `<tr><td>${when(c.receivedAt)}</td>
+      <td>${c.correlationId ? `<a href="#/job/${encodeURIComponent(c.correlationId)}/callbacks">${esc(c.correlationId)}</a>` : pill("unknown job", "warn")}<div class="mono hint">${esc(c.aceJobId)}</div></td>
+      <td>${c.attempt}</td><td>${pill(c.answeredWith, c.answeredWith === 200 ? "ok" : "warn")}</td><td>${pill(`${s.code} ${s.value}`, s.code === 0 ? "ok" : "bad")}</td>
+      <td class="mono" style="font-size:12px">${esc(p.batchPath || "—")}</td><td>${c.contractErrors.length ? pill(`${c.contractErrors.length} deviations`, "bad") : pill("ok", "ok")}</td></tr>
+      <tr><td></td><td colspan="6"><details><summary>payload, headers and checks</summary><pre style="margin-top:8px">${esc(JSON.stringify({payload: p, contractErrors: c.contractErrors, idempotencyKey: c.idempotencyKey, callerPrincipal: c.callerPrincipal, headers: c.headers}, null, 2))}</pre></details></td></tr>`; }).join("")}</table></div>
+    <div class="wz-foot"><span class="hint">${page.offset + 1}–${page.offset + page.items.length} of ${page.total}</span><span class="spacer"></span>
+      <button class="btn sm" id="cb-prev" ${page.offset ? "" : "disabled"}>${icon("back")}Previous</button><button class="btn sm" id="cb-next" ${page.offset + page.items.length < page.total ? "" : "disabled"}>Next${icon("arrow")}</button></div>`
+    : `<div class="empty">No callbacks match.</div>`;
+  if ($("#cb-prev")) { $("#cb-prev").onclick = () => { cbState.offset = Math.max(0, cbState.offset - PAGE); drawCallbacks(); }; $("#cb-next").onclick = () => { cbState.offset += PAGE; drawCallbacks(); }; }
+}
+async function pageReports() {
+  main().innerHTML = `<div class="page-head"><div><h1>Scenario runs</h1><div class="sub">Scripted runs (<span class="mono">eocr_sim.py run</span>); their jobs are also listed under Jobs</div></div></div><div id="rp"><div class="empty">Loading…</div></div>`;
+  let reps; try { reps = await api("GET", "/api/reports"); } catch (e) { $("#rp").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  $("#rp").innerHTML = reps.length ? `<div class="stack">${reps.map(r => `<div class="card"><div class="card-h"><h3>${when(r.finishedAt, true)}</h3>${pill(r.passed ? "passed" : "failed", r.passed ? "ok" : "bad")}
+      <span class="right mono hint">${esc(r.key)}</span></div><div class="tbl"><table><tr><th>Scenario</th><th>Result</th><th>Job</th><th>Minutes</th><th>Errors</th></tr>
+      ${r.results.map(x => `<tr><td><b>${esc(x.scenario)}</b></td><td>${pill(x.passed ? "passed" : "failed", x.passed ? "ok" : "bad")}</td>
+        <td>${x.correlationId ? `<a href="#/job/${encodeURIComponent(x.correlationId)}">${esc(x.correlationId)}</a>` : ""}<div class="mono hint">${esc(x.aceJobId || "")}</div></td>
+        <td>${esc(x.minutes ?? "")}</td><td>${(x.errors || []).map(e => `<div style="color:var(--bad)">${esc(e)}</div>`).join("")}</td></tr>`).join("")}</table></div></div>`).join("")}</div>`
+    : `<div class="card"><div class="empty">No scenario runs yet.</div></div>`;
+}
+
+// ================================================================== settings, help, sign-in
 function renderEnv() {
-  const el = $("#env-ace") || (() => { const s = document.createElement("span"); s.id = "env-ace"; $("#env").prepend(s); return s; })();
-  el.innerHTML = `ACE default ${esc(cfg.defaultAceUrl || "(not set)")}${cfg.defaultAceUrl !== cfg.integrationUrl ? " (changed)" : ""} <a href="#" id="ace-change">change</a>`;
-  $("#ace-change").onclick = e => { e.preventDefault(); $("#ace-url").value = cfg.defaultAceUrl || "";
-    $("#ace-env").textContent = cfg.integrationUrl || "(not set)"; $("#dlg-ace").showModal(); };
+  $("#env-ace").textContent = cfg.defaultAceUrl || "(not set)";
+  $("#ace-change").onclick = e => { e.preventDefault(); $("#ace-url").value = cfg.defaultAceUrl || ""; $("#ace-env").textContent = cfg.integrationUrl || "(not set)"; $("#dlg-ace").showModal(); };
 }
+const saveAce = (btn, url) => act(btn, () => api("PUT", "/api/settings", {aceUrl: url}), "Default ACE endpoint saved").then(r => { if (r) { cfg = r; renderEnv(); $("#dlg-ace").close(); } });
+$("#ace-save").onclick = e => saveAce(e.currentTarget, $("#ace-url").value.trim());
+$("#ace-reset").onclick = e => saveAce(e.currentTarget, "");
 $("#ace-cancel").onclick = () => $("#dlg-ace").close();
-const saveAce = (btn, url) => act(btn, () => api("PUT", "/api/settings", {aceUrl: url}), "Default ACE endpoint saved")
-  .then(r => { if (r) { cfg = r; renderEnv(); $("#dlg-ace").close(); if (current) render(current); } });
-$("#ace-save").onclick = e => saveAce(e.target, $("#ace-url").value.trim());
-$("#ace-reset").onclick = e => saveAce(e.target, "");
+$("#c-cancel").onclick = () => $("#dlg-close").close();
+$("#v-close").onclick = () => $("#dlg-view").close();
+$("#hitl-cancel").onclick = () => $("#dlg-hitl").close();
+$("#help").onclick = e => { e.preventDefault(); $("#dlg-help").showModal(); };
+$("#help-close").onclick = () => $("#dlg-help").close();
 
-// ---------------------------------------------------------------- boot
 function showLogin(mode) {
   authMode = mode || authMode;
   if (authMode === "oidc") {
@@ -876,27 +1086,19 @@ $("#login-form").onsubmit = async e => { e.preventDefault();
   $("#login-password").value = "";
   if (r) { signedIn(r.user); boot(); } };
 $("#logout").onclick = async e => { e.preventDefault(); await api("POST", "/api/logout").catch(() => {}); user = null; location.hash = ""; location.reload(); };
-$("#help").onclick = () => $("#dlg-help").showModal();
-$("#help-close").onclick = () => $("#dlg-help").close();
+
 let booted = false;
 async function boot() {
   if (booted) return; booted = true;
+  $("#me-av").textContent = String(user || "?").trim().split(/[\s.@_-]+/).filter(Boolean).slice(0, 2).map(x => x[0].toUpperCase()).join("") || "?";
   try { cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message, true); }
   renderEnv();
-  $("#env").insertAdjacentHTML("beforeend", `<span>intake s3://${esc(cfg.intakeBucket)}</span><span>output s3://${esc(cfg.outputBucket)}</span>`);
-  if (location.hash.length > 1) { showTab("exec"); select(decodeURIComponent(location.hash.slice(1))); } else showTab("pipe");
-  let tick = 0;
-  setInterval(() => {
-    tick++;
-    if (tab === "exec") { loadList(); if (current && current.state !== "CLOSED" || !current) loadDetail(false); }
-    else if (tab === "pipe") loadPipeline();
-    else if (tab === "cb" && !cbOpen.size) loadCallbacks();
-    if (tick % 3 === 0) {  // keep both badges current whatever tab is open
-      if (tab !== "pipe") api("GET", "/api/batches?days=30&state=attention&limit=1").then(p => updateBadge("pipe", p.total)).catch(() => {});
-      if (tab !== "cb") api("GET", "/api/callbacks?limit=1").then(p => updateBadge("cb", p.attention)).catch(() => {});
-    }
-  }, 10000);
-  api("GET", "/api/callbacks?limit=1").then(p => updateBadge("cb", p.attention)).catch(() => {});
+  route();
+  const badges = () => {
+    api("GET", "/api/batches?days=30&state=attention&limit=1").then(p => setCount("#n-attn", p.total)).catch(() => {});
+    api("GET", "/api/callbacks?limit=1").then(p => setCount("#n-cb", p.attention)).catch(() => {});
+  };
+  badges(); setInterval(() => { if (!document.hidden) badges(); }, 30000);
 }
 api("GET", "/api/me").then(r => { authMode = r.mode; if (r.user) { signedIn(r.user); boot(); } else showLogin(r.mode); })
   .catch(e => toast(e.message, true));
