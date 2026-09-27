@@ -46,13 +46,25 @@ step traced end to end:
 
 "Resubmit as new execution" copies the package into a new `correlationId`.
 
+Everything the console shows about a job's progress comes from ACE itself: the Status API, ACE's callbacks and the
+result file in ACE's output bucket. The console never makes up a status; it only records, checks and displays what
+ACE reported. What it decides on its own is eOCR's side: draft/staged before submission, closing, and the warning flags.
+
+Each execution opens on a **status banner** that says in words what is happening and what, if anything, you need to
+do (e.g. "Action needed: HITL review", "ACE finished but has not called back"). It then shows two sub-tabs:
+**Tracking** (progress in ACE, callbacks, result, spec compliance, stored records, timeline), the default once
+submitted, and **Package & submission** (documents, control file, submit). Times are shown in your local time, with
+UTC on hover. Enter your name at the top right (kept in the browser): it is recorded as creator, submitter or closer
+and on every timeline event you cause, and the pipeline can show "only mine". The **?** button explains the terms.
+
 Views, for coming back days later:
 
 | Tab | Shows |
 |---|---|
-| **Pipeline** | every execution as a board: Draft, Staged, Processing in ACE, Awaiting callback, Closed completed, Closed failed, Rejected. Search by loanId / correlationId / aceJobId and pick a period (24h, 7d, 30d, all). Flags: *no callback* (Status API terminal but no callback after the grace period), *no change 24h+* for open executions, contract errors, closed by hand |
+| **Pipeline** | summary tiles (executions, submitted in 24h, open, completed %, failed, average time to callback, need attention; click a tile to filter) over a board: Draft, Staged, Processing in ACE, Awaiting callback, Closed completed, Closed failed, Rejected. Search by loanId / correlationId / aceJobId and pick a period (24h, 7d, 30d, all). Flags: *no callback* (Status API terminal but no callback after the grace period), *no change 24h+* for open executions, contract errors, closed by hand. Empty columns are folded into one line. **Export CSV** downloads the executions shown |
 | **Executions** | one execution in full: stepper, documents, control file, onboarding, stage history, callbacks (every attempt with payload, headers and checks), result, contract checks, **stored records**, timeline |
-| **Callbacks** | every delivery the eOCR endpoint received across all jobs, including unknown aceJobIds; filter by accepted / refused / contract errors / unknown; click a row for payload, headers, Idempotency-Key and checks |
+| **Callbacks** | every delivery the eOCR endpoint received across all jobs, including unknown aceJobIds; filter by accepted / refused / contract errors / unknown; click a row for payload, headers, Idempotency-Key and checks. Refreshes on its own; **Export CSV** downloads every delivery |
+| Tab badges | Pipeline: executions needing attention. Callbacks: deliveries with spec deviations or for unknown jobs |
 | **Scenario reports** | `run` reports; scenario runs also write their executions into the ledger, so they are on the board too |
 
 ### ACE endpoint

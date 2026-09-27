@@ -231,8 +231,16 @@ def _precondition_failed(exc):
     return getattr(exc, "response", {}).get("Error", {}).get("Code") in ("PreconditionFailed", "ConditionalRequestConflict")
 
 
+OPERATOR = threading.local()  # the console sets .name for the request it is serving: who did it goes into every event
+
+
+def operator():
+    return getattr(OPERATOR, "name", None)
+
+
 def add_event(batch, kind, message, **data):
-    batch.setdefault("events", []).append({"at": now_iso(), "type": kind, "message": message, **({"data": data} if data else {})})
+    by = {"by": operator()} if operator() else {}
+    batch.setdefault("events", []).append({"at": now_iso(), "type": kind, "message": message, **by, **({"data": data} if data else {})})
     del batch["events"][:-MAX_EVENTS]
 
 
@@ -270,7 +278,7 @@ def create_batch(loan_id, correlation_id=None, loan_info=None, extraction_requir
         "extractionRequired": bool(extraction_required), "controlOverride": None,
         "documents": [], "controlFile": None, "batchPath": None, "aceJobId": None, "flaky": 0,
         "status": None, "stages": [], "contractErrors": [], "callback": None, "result": None, "outcome": None,
-        "closedAt": None, "closedBy": None, "events": [],
+        "closedAt": None, "closedBy": None, "createdBy": operator(), "submittedBy": None, "closedByUser": None, "events": [],
     }
     add_event(batch, "created", f"execution {cid} created for loan {loan_id} ({source})")
     try:
@@ -309,7 +317,8 @@ _summaries = {}  # batch key -> (ETag, summary): the ledger only grows, so re-re
 def _summary(b):
     st = b.get("status") or {}
     return {k: b.get(k) for k in ("correlationId", "loanId", "aceJobId", "state", "source", "createdAt", "updatedAt", "submittedAt",
-                                  "closedAt", "closedBy", "callbackOverdue", "resubmissionOf", "outcomeRecord", "aceUrl")} \
+                                  "closedAt", "closedBy", "callbackOverdue", "resubmissionOf", "outcomeRecord", "aceUrl",
+                                  "createdBy", "submittedBy", "closedByUser")} \
         | {"status": st.get("status"), "workflow": st.get("workflow"), "outcome": b.get("outcome"),
            "documents": len(b.get("documents") or []), "resultOk": (b.get("result") or {}).get("ok"),
            "callbackAt": (b.get("callback") or {}).get("receivedAt"), "callbackAttempts": (b.get("callback") or {}).get("attempt"),
@@ -335,7 +344,7 @@ def list_batches(q="", since_days=None, limit=2000):
             cached = (o["ETag"], _summary(json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())))
             _summaries[o["Key"]] = cached
         summary = cached[1]
-        if q and not any(q in str(summary.get(k) or "").lower() for k in ("loanId", "correlationId", "aceJobId")):
+        if q and not any(q in str(summary.get(k) or "").lower() for k in ("loanId", "correlationId", "aceJobId", "createdBy", "submittedBy")):
             continue
         out.append(summary)
         if len(out) >= limit:
@@ -470,7 +479,8 @@ def store_submission(cid, request, http_status, response):
         control = {"unreadable": f"{type(exc).__name__}: {exc}"}
     at = now_iso()
     record = {"correlationId": cid, "loanId": batch["loanId"], "source": batch["source"], "submittedAt": at,
-              "aceUrl": batch.get("aceUrl") or INTEGRATION_URL, "endpoint": "POST /integration/loan/onboarding", "request": request, "httpStatus": http_status, "response": response,
+              "aceUrl": batch.get("aceUrl") or INTEGRATION_URL, "submittedBy": operator() or batch.get("submittedBy"),
+              "endpoint": "POST /integration/loan/onboarding", "request": request, "httpStatus": http_status, "response": response,
               "aceJobId": response.get("aceJobId") if isinstance(response, dict) else None,
               "controlFileKey": f"s3://{INTAKE_BUCKET}/{control_key}", "controlFile": control, "documents": docs}
     key = _put_record(cid, f"submission-{at.replace(':', '')}.json", record)
@@ -498,7 +508,7 @@ def store_outcome(cid):
             log("Response.json copy failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
             copy = None
     record = {"correlationId": cid, "loanId": batch["loanId"], "aceJobId": batch.get("aceJobId"), "submission": batch.get("submission"),
-              "closedAt": batch["closedAt"], "closedBy": batch["closedBy"], "outcome": batch["outcome"],
+              "closedAt": batch["closedAt"], "closedBy": batch["closedBy"], "closedByUser": batch.get("closedByUser"), "outcome": batch["outcome"],
               "callbackAccepted": batch.get("callback"), "callbackAttempts": callback_records(batch["aceJobId"]) if batch.get("aceJobId") else [],
               "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
               "responseFileCopy": f"s3://{INTAKE_BUCKET}/{copy}" if copy else None,

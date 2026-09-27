@@ -168,7 +168,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
         b["batchPath"] = batch_path
         b["aceUrl"] = ace_url
         if code == 202 and job:
-            b.update(state="SUBMITTED", aceJobId=job, flaky=flaky, submittedAt=now_iso())
+            b.update(state="SUBMITTED", aceJobId=job, flaky=flaky, submittedAt=now_iso(), submittedBy=sim.operator())
             add_event(b, "submitted", f"onboarding at {ace_url} -> HTTP 202, aceJobId {job}" + (f"; callback endpoint will refuse the first {flaky} deliveries" if flaky else ""),
                       request=request, response=resp)
             if not ack_ok:
@@ -217,7 +217,7 @@ def close(cid, note=""):
         if body:
             sim.record_status(b, body, "close")
         by = "reconciliation" if terminal else "manual"
-        b.update(state="CLOSED", closedAt=now_iso(), closedBy=by)
+        b.update(state="CLOSED", closedAt=now_iso(), closedBy=by, closedByUser=sim.operator())
         if terminal:
             b["result"] = result
             b["outcome"] = {k: st.get(k) for k in ("code", "value", "description")} | {"batchPath": body.get("batchPath"), "failedDocuments": body.get("failedDocuments")}
@@ -441,6 +441,61 @@ def _record(h, q, cid, name):
     return sim.read_record(cid, urllib.parse.unquote(name))
 
 
+class Download:
+    def __init__(self, data, content_type, filename):
+        self.data, self.content_type, self.filename = data, content_type, filename
+
+
+def to_csv(rows, columns, filename):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([c for c, _ in columns])
+    for r in rows:
+        w.writerow(["" if (v := get_(r)) is None else v for _, get_ in columns])
+    return Download(buf.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", filename)
+
+
+def _minutes(a, b):
+    try:
+        return round((sim.datetime.fromisoformat(b.replace("Z", "+00:00")) - sim.datetime.fromisoformat(a.replace("Z", "+00:00"))).total_seconds() / 60, 1)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+@route("GET", r"/api/export/executions\.csv")
+def _export_executions(h, q):
+    rows = sim.list_batches(q.get("q", ""), q.get("days") or None, limit=100000)
+    o = lambda r, k: (r.get("outcome") or {}).get(k)  # noqa: E731
+    return to_csv(rows, [
+        ("correlationId", lambda r: r["correlationId"]), ("loanId", lambda r: r["loanId"]), ("aceJobId", lambda r: r["aceJobId"]),
+        ("state", lambda r: r["state"]), ("outcomeCode", lambda r: o(r, "code")), ("outcome", lambda r: o(r, "value")),
+        ("description", lambda r: o(r, "description")), ("failedDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" for f in o(r, "failedDocuments") or [])),
+        ("resultFile", lambda r: o(r, "batchPath")), ("aceStage", lambda r: (r.get("workflow") or {}).get("stage")), ("aceState", lambda r: (r.get("workflow") or {}).get("state")),
+        ("createdAt", lambda r: r["createdAt"]), ("createdBy", lambda r: r.get("createdBy")), ("submittedAt", lambda r: r.get("submittedAt")),
+        ("submittedBy", lambda r: r.get("submittedBy")), ("callbackAt", lambda r: r.get("callbackAt")), ("callbackAttempts", lambda r: r.get("callbackAttempts")),
+        ("minutesToCallback", lambda r: _minutes(r.get("submittedAt"), r.get("callbackAt"))), ("closedAt", lambda r: r.get("closedAt")),
+        ("closedBy", lambda r: r.get("closedBy")), ("closedByUser", lambda r: r.get("closedByUser")), ("contractErrors", lambda r: r.get("contractErrors")),
+        ("aceEndpoint", lambda r: r.get("aceUrl")), ("source", lambda r: r.get("source")), ("documents", lambda r: r.get("documents")),
+    ], f"eocr-executions-{sim.now_iso()[:10]}.csv")
+
+
+@route("GET", r"/api/export/callbacks\.csv")
+def _export_callbacks(h, q):
+    rows = sim.list_callbacks(100000)
+    p = lambda r: r.get("payload") or {}  # noqa: E731
+    s_ = lambda r: p(r).get("status") if isinstance(p(r).get("status"), dict) else {}  # noqa: E731
+    return to_csv(rows, [
+        ("receivedAt", lambda r: r["receivedAt"]), ("aceJobId", lambda r: r["aceJobId"]), ("correlationId", lambda r: r.get("correlationId")),
+        ("attempt", lambda r: r["attempt"]), ("answeredWith", lambda r: r["answeredWith"]), ("statusCode", lambda r: s_(r).get("code")),
+        ("status", lambda r: s_(r).get("value")), ("description", lambda r: s_(r).get("description")), ("batchPath", lambda r: p(r).get("batchPath")),
+        ("failedDocuments", lambda r: "; ".join(f"{f.get('documentName')}: {f.get('reason')}" for f in p(r).get("failedDocuments") or [] if isinstance(f, dict))),
+        ("idempotencyKey", lambda r: r.get("idempotencyKey")), ("callerPrincipal", lambda r: r.get("callerPrincipal")),
+        ("contractErrors", lambda r: " | ".join(r.get("contractErrors") or [])),
+    ], f"eocr-callbacks-{sim.now_iso()[:10]}.csv")
+
+
 @route("GET", r"/api/reports")
 def _reports(h, q):
     return reports()
@@ -459,13 +514,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return body
 
-    def _send(self, code, data, content_type="application/json"):
+    def _send(self, code, data, content_type="application/json", filename=None):
         if not isinstance(data, bytes):
             data = json.dumps(data, default=str).encode()
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -478,8 +535,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         for m, pattern, fn in ROUTES:
             match = pattern.match(url.path)
             if m == method and match:
+                name = re.sub(r"[^\w .@-]", "", urllib.parse.unquote(self.headers.get("X-Operator") or ""))[:64].strip()
+                sim.OPERATOR.name = name or None
                 try:
-                    return self._send(200, fn(self, q, **match.groupdict()))
+                    result = fn(self, q, **match.groupdict())
+                    if isinstance(result, Download):
+                        return self._send(200, result.data, result.content_type, result.filename)
+                    return self._send(200, result)
                 except KeyError as exc:
                     return self._send(404, {"error": f"not found: {exc.args[0] if exc.args else ''}"})
                 except Conflict as exc:
