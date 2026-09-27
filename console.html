@@ -20,7 +20,20 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-#view-rep { display: block; }
+#view-rep, #view-pipe, #view-cb { display: block; }
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(230px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+.col { background: var(--soft); border-radius: 10px; padding: 10px; min-height: 120px; }
+.col h4 { margin: 0 0 8px; font-size: 12.5px; display: flex; justify-content: space-between; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.col h4 b { color: var(--ink); font-size: 14px; }
+.pcard { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; font-size: 12.5px; }
+.pcard:hover { border-color: var(--accent); }
+.pcard .cid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.pcard .sub { color: var(--muted); margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+.toolbar input { flex: 0 1 320px; }
+.totals { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+tr.cb { cursor: pointer; } tr.cb:hover td { background: var(--soft); }
+a { color: var(--accent); }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
 header h1 { font-size: 17px; margin: 0; }
@@ -105,13 +118,24 @@ dialog h3 { margin: 0 0 12px; }
 <header>
   <h1>eOCR Simulator Console</h1>
   <div class="env" id="env"></div>
-  <nav><button id="tab-exec" class="on">Executions</button><button id="tab-rep">Scenario reports</button></nav>
+  <nav><button id="tab-pipe" class="on">Pipeline</button><button id="tab-exec">Executions</button><button id="tab-cb">Callbacks</button><button id="tab-rep">Scenario reports</button></nav>
 </header>
-<main id="view-exec">
+<main id="view-pipe"><section style="padding:18px 22px">
+  <div class="toolbar"><input id="p-q" type="search" placeholder="Search loanId, correlationId or aceJobId">
+    <select id="p-days"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="">All time</option></select>
+    <button class="primary" id="p-new">+ New execution</button><span class="totals" id="p-totals"></span></div>
+  <div class="board" id="board"></div></section></main>
+<main id="view-cb" hidden><section style="padding:18px 22px">
+  <div class="toolbar"><select id="cb-filter"><option value="">All deliveries</option><option value="accepted">Accepted (200)</option><option value="refused">Refused</option>
+    <option value="errors">With contract errors</option><option value="unknown">Unknown aceJobId</option></select>
+    <input id="cb-q" type="search" placeholder="Filter by aceJobId or correlationId"><span class="totals" id="cb-totals"></span></div>
+  <div class="card"><div id="cb-table"></div></div></section></main>
+<main id="view-exec" hidden>
   <aside>
     <div class="tools">
       <button class="primary" id="new">+ New execution</button>
-      <select id="filter" aria-label="Filter by state">
+      <input id="q" type="search" placeholder="Search" style="flex:1;min-width:0">
+      <select id="filter" aria-label="Filter by state" style="flex:0 0 auto">
         <option value="">All states</option><option value="open">Open</option><option>DRAFT</option><option>STAGED</option>
         <option>SUBMITTED</option><option>IN_PROGRESS</option><option>CLOSED</option><option>REJECTED</option>
       </select>
@@ -149,6 +173,16 @@ dialog h3 { margin: 0 0 12px; }
     the console asks the Status API first, and if the job is terminal it retrieves the result (reconciliation); otherwise it records the execution as abandoned.</p>
   <label>Note<input id="c-note" placeholder="why it is being closed"></label>
   <div class="row" style="justify-content:flex-end; margin-top: 12px"><button id="c-cancel">Cancel</button><button class="primary" id="c-ok">Close execution</button></div>
+</dialog>
+
+<dialog id="dlg-ace">
+  <h3>Default ACE endpoint</h3>
+  <p style="color:var(--muted);font-size:13px">Used for new submissions unless one is given on the submission itself. Saved in S3
+    (<span class="mono">eocr-sim/settings.json</span>). Each execution keeps the endpoint it was submitted to for its status polling, HITL and close.
+    Environment default (ACE_URL_INTEGRATION): <span class="mono" id="ace-env"></span></p>
+  <label>ACE integration base URL<input id="ace-url" placeholder="https://…"></label>
+  <div class="row" style="justify-content:space-between;margin-top:12px"><button id="ace-reset">Use environment default</button>
+    <span><button id="ace-cancel">Cancel</button> <button class="primary" id="ace-save">Save</button></span></div>
 </dialog>
 
 <div id="toast"></div>
@@ -194,7 +228,7 @@ const ago = iso => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso
 // ---------------------------------------------------------------- list
 async function loadList() {
   let items;
-  try { items = await api("GET", "/api/batches"); } catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  try { items = await api("GET", "/api/batches?q=" + encodeURIComponent($("#q").value)); } catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const f = $("#filter").value;
   items = items.filter(b => !f || (f === "open" ? !["CLOSED", "REJECTED"].includes(b.state) : b.state === f));
   $("#list").innerHTML = items.length ? items.map(b => `
@@ -207,6 +241,7 @@ async function loadList() {
 }
 $("#list").addEventListener("click", e => { const it = e.target.closest(".item"); if (it) select(it.dataset.cid); });
 $("#filter").addEventListener("change", loadList);
+$("#q").addEventListener("input", () => { clearTimeout(loadList.h); loadList.h = setTimeout(loadList, 300); });
 
 async function select(cid) {
   if (cid !== selected) { controlDirty = false; rawMode = false; }
@@ -252,7 +287,7 @@ function render(b) {
     <div class="meta"><span>loanId <b>${esc(b.loanId)}</b></span><span>aceJobId <b>${esc(b.aceJobId || "—")}</b></span>
       <span>source <b>${esc(b.source)}</b></span><span>created <b>${esc(b.createdAt)}</b></span>
       ${b.resubmissionOf ? `<span>resubmission of <b>${esc(b.resubmissionOf)}</b></span>` : ""}
-      <span>intake <b>${esc(b.s3.intake)}</b></span></div>
+      ${b.aceUrl ? `<span>ACE <b>${esc(b.aceUrl)}</b></span>` : ""}<span>intake <b>${esc(b.s3.intake)}</b></span></div>
     ${steps(b)}
     <div class="grid">
       ${docsCard(b, editable)}
@@ -262,6 +297,7 @@ function render(b) {
       ${callbackCard(b)}
       ${resultCard(b)}
       ${checksCard(b)}
+      ${recordsCard(b)}
       ${timelineCard(b)}
     </div>`;
   if (savedControl) $("#control-card").replaceWith(savedControl); else renderControl(b, editable);
@@ -312,10 +348,11 @@ function submitCard(b) {
     <p class="hint">Spec 4. ACE answers 202 with an aceJobId and processes asynchronously.</p>
     ${canSubmit ? `<div class="row">
         <label>batchPath<select id="s-mode"><option value="file">control file (…/${esc(b.controlFileName)})</option><option value="folder">folder (…/correlationId=…/)</option></select></label>
+        <label style="flex-basis:100%">ACE endpoint for this submission<input id="s-ace" value="${esc(cfg.defaultAceUrl || "")}" placeholder="default ACE endpoint"></label>
         <label title="The callback endpoint answers 503 to the first N deliveries: proves ACE retries.">Refuse first N callbacks (simulated outage)<input type="number" id="s-flaky" min="0" max="10" value="0"></label></div>
       <button class="primary" id="s-submit">Submit to ACE</button>`
       : b.state === "DRAFT" ? `<p class="hint">Write the control file first.</p>` : ""}
-    ${ev ? `<dl class="kv" style="margin-top:10px"><dt>result</dt><dd>${esc(ev.message)}</dd><dt>batchPath</dt><dd class="mono">${esc(b.batchPath)}</dd>
+    ${ev ? `<dl class="kv" style="margin-top:10px"><dt>ACE endpoint</dt><dd class="mono">${esc(b.aceUrl || "—")}</dd><dt>result</dt><dd>${esc(ev.message)}</dd><dt>batchPath</dt><dd class="mono">${esc(b.batchPath)}</dd>
       ${b.flaky ? `<dt>outage</dt><dd>first ${b.flaky} callbacks refused</dd>` : ""}</dl>
       <details><summary>request / response</summary><pre>${J(ev.data)}</pre></details>` : ""}
   </div>`;
@@ -349,7 +386,7 @@ function callbackCard(b) {
         <td class="mono" title="${esc(c.callerPrincipal)}">${esc((c.callerPrincipal || "unsigned").split("/").slice(-2, -1)[0] || c.callerPrincipal || "unsigned")}</td>
         <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} errors`, "s-bad") : chip("ok", "s-ok")}</td></tr>`; }).join("")}</table></div>
       <p class="hint" style="margin-top:8px">Idempotency-Key: <span class="mono">${esc([...new Set(cbs.map(c => c.idempotencyKey))].join(", ") || "—")}</span></p>
-      <details><summary>last payload</summary><pre>${J(cbs[cbs.length - 1].payload)}</pre></details>`
+      ${cbs.map(c => `<details><summary>attempt ${c.attempt} (${esc(c.answeredWith)}) payload, headers, checks</summary><pre>${J({payload: c.payload, contractErrors: c.contractErrors, headers: c.headers, callerPrincipal: c.callerPrincipal})}</pre></details>`).join("")}`
       : `<p class="hint">${b.aceJobId ? "Waiting for ACE to call back." : "Nothing yet."}</p>`}
   </div>`;
 }
@@ -371,6 +408,17 @@ function resultCard(b) {
         <td>${esc(x.docTypeName || x.docTypeId)}${x.duplicatePagesOf ? ` <span class="chip s-warn">dup of ${esc(x.duplicatePagesOf)}</span>` : ""}</td>
         <td>${Object.entries(x.fields || {}).map(([k, v]) => `<div><span class="mono">${esc(k)}</span>: ${esc(v)}</div>`).join("") || "—"}</td></tr>`).join("")}</table></div>
       <p><button id="r-raw">View raw Response.json</button></p><pre id="r-json" hidden></pre>` : ""}
+  </div>`;
+}
+
+function recordsCard(b) {
+  const recs = b.records || [];
+  return `<div class="card"><h3>Stored records <span style="font-weight:400;color:var(--muted)">s3://${esc(cfg.intakeBucket)}/eocr-sim/records/${esc(b.correlationId)}/</span></h3>
+    <p class="hint">Written once and kept: what was submitted (control file, document sizes and ETags, request/response) and how it ended
+      (outcome, every callback attempt, Status API at close, a copy of *Response.json).</p>
+    ${recs.length ? `<table><tr><th>record</th><th>stored</th><th>bytes</th></tr>${recs.map(r => `<tr><td class="mono"><a href="#" data-rec="${esc(r.name)}">${esc(r.name)}</a></td>
+      <td class="mono">${esc(r.storedAt.slice(0, 19))}</td><td>${fmt(r.bytes)}</td></tr>`).join("")}</table><pre id="rec-view" hidden></pre>`
+      : `<p class="hint">Nothing stored yet: the submission record is written on onboarding, the outcome record on close.</p>`}
   </div>`;
 }
 
@@ -424,8 +472,10 @@ function wire(b) {
   if ($("#cf-save")) $("#cf-save").onclick = e => act(e.target, () => api("PUT", base + "/control", controlBody()), "Saved").then(after);
   if ($("#cf-stage")) $("#cf-stage").onclick = e => act(e.target, async () => { await api("PUT", base + "/control", controlBody()); return api("POST", base + "/stage"); },
     "Control file written to S3").then(after);
-  if ($("#s-submit")) $("#s-submit").onclick = e => act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value}))
+  if ($("#s-submit")) $("#s-submit").onclick = e => act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}))
     .then(r => { if (r) toast(r.state === "REJECTED" ? "ACE rejected the onboarding request — see timeline" : `Accepted: ${r.aceJobId}`, r.state === "REJECTED"); after(r); });
+  document.querySelectorAll("[data-rec]").forEach(a => a.onclick = e => { e.preventDefault();
+    act(null, () => api("GET", `${base}/records/${encodeURIComponent(a.dataset.rec)}`)).then(r => { if (r) { const p = $("#rec-view"); p.textContent = JSON.stringify(r, null, 2); p.hidden = false; } }); });
   if ($("#r-raw")) $("#r-raw").onclick = e => act(e.target, () => api("GET", base + "/response")).then(r => { if (r) { const p = $("#r-json"); p.textContent = JSON.stringify(r, null, 2); p.hidden = !p.hidden; } });
   if ($("#h-load")) $("#h-load").onclick = e => act(e.target, () => api("GET", base + "/hitl")).then(r => {
     if (!r) return; const fields = ((r.review || {}).fieldDetails) || [];
@@ -456,7 +506,7 @@ $("#n-create").onclick = e => {
   Object.assign(li, {sellerLoanNumber: $("#n-seller").value.trim(), loanAmount: $("#n-amount").value.trim(), borrowerLastName: $("#n-borrower").value.trim()});
   act(e.target, () => api("POST", "/api/batches", {loanId: $("#n-loan").value.trim(), correlationId: $("#n-cid").value.trim(), loanInfo: li,
     extractionRequired: $("#n-extract").checked, controlFileName: $("#n-control").value.trim()}), "Execution created")
-    .then(r => { if (r) { $("#dlg-new").close(); delete $("#n-fill").dataset.extra; loadList(); select(r.correlationId); } });
+    .then(r => { if (r) { $("#dlg-new").close(); delete $("#n-fill").dataset.extra; showTab("exec"); select(r.correlationId); } });
 };
 
 // ---------------------------------------------------------------- reports
@@ -472,19 +522,102 @@ async function loadReports() {
       : `<div class="empty">No scenario reports yet.</div>`);
 }
 $("#reports").addEventListener("click", e => { const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); select(a.dataset.go); } });
+const TABS = {pipe: loadPipeline, exec: loadList, cb: loadCallbacks, rep: loadReports};
+let tab = "pipe";
 function showTab(t) {
-  $("#tab-exec").classList.toggle("on", t === "exec"); $("#tab-rep").classList.toggle("on", t === "rep");
-  $("#view-exec").hidden = t !== "exec"; $("#view-rep").hidden = t !== "rep"; if (t === "rep") loadReports();
+  tab = t;
+  for (const k of Object.keys(TABS)) { $("#tab-" + k).classList.toggle("on", k === t); $("#view-" + k).hidden = k !== t; }
+  TABS[t]();
 }
-$("#tab-exec").onclick = () => showTab("exec"); $("#tab-rep").onclick = () => showTab("rep");
+for (const k of Object.keys(TABS)) $("#tab-" + k).onclick = () => showTab(k);
+
+// ---------------------------------------------------------------- pipeline
+const COLUMNS = [
+  ["Draft", b => b.state === "DRAFT"],
+  ["Staged", b => b.state === "STAGED"],
+  ["Processing in ACE", b => ["SUBMITTED", "IN_PROGRESS"].includes(b.state) && !TERMINAL(b)],
+  ["Awaiting callback", b => (["SUBMITTED", "IN_PROGRESS"].includes(b.state) && TERMINAL(b)) || b.state === "CALLBACK_RECEIVED"],
+  ["Closed · completed", b => b.state === "CLOSED" && b.outcome && b.outcome.code === 0],
+  ["Closed · failed", b => b.state === "CLOSED" && !(b.outcome && b.outcome.code === 0)],
+  ["Rejected", b => b.state === "REJECTED"],
+];
+const TERMINAL = b => [0, 1000, 2000, 3000].includes((b.status || {}).code);
+const STALE_H = 24;
+async function loadPipeline() {
+  let items;
+  try { items = await api("GET", `/api/batches?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`); }
+  catch (e) { $("#board").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const open = items.filter(b => !["CLOSED", "REJECTED"].includes(b.state));
+  const stale = open.filter(b => Date.now() - Date.parse(b.updatedAt) > STALE_H * 3600e3);
+  $("#p-totals").textContent = `${items.length} executions · ${open.length} open · ${stale.length} unchanged for ${STALE_H}h+ · ${items.filter(b => b.contractErrors).length} with contract errors`;
+  $("#board").innerHTML = COLUMNS.map(([name, test]) => { const col = items.filter(test); return `<div class="col"><h4>${esc(name)} <b>${col.length}</b></h4>
+    ${col.map(b => { const wf = b.workflow || {}, st = b.status || {}, isStale = stale.includes(b);
+      return `<div class="pcard" data-go="${esc(b.correlationId)}"><div class="cid">${esc(b.correlationId)}</div>
+      <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}</div>
+      <div class="sub">${b.state === "CLOSED" && b.outcome ? chip(`${b.outcome.code ?? "—"} ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad")
+        : wf.stage ? `<span>${esc(wf.stage)}/${esc(wf.state)}</span>${st.code !== undefined ? chip(`${st.code} ${st.value}`, CODE_CLASS(st.code)) : ""}` : ""}
+        ${b.closedBy && b.closedBy !== "callback" ? chip(`closed by ${b.closedBy}`, "s-warn") : ""}
+        ${b.callbackOverdue && b.state !== "CLOSED" ? chip("no callback", "s-bad") : ""}${isStale ? chip(`no change ${STALE_H}h+`, "s-warn") : ""}
+        ${b.contractErrors ? chip(`${b.contractErrors} contract errors`, "s-bad") : ""}</div>
+      ${b.aceUrl && b.aceUrl !== cfg.defaultAceUrl ? `<div class="sub mono">ACE ${esc(b.aceUrl)}</div>` : ""}
+      <div class="sub"><span>${esc(b.source)}</span><span>submitted ${esc(b.submittedAt ? ago(b.submittedAt) : "—")}</span><span>updated ${ago(b.updatedAt)}</span></div></div>`; }).join("")}
+    </div>`; }).join("");
+}
+$("#board").addEventListener("click", e => { const c = e.target.closest("[data-go]"); if (c) { showTab("exec"); select(c.dataset.go); } });
+$("#p-q").addEventListener("input", () => { clearTimeout(loadPipeline.h); loadPipeline.h = setTimeout(loadPipeline, 300); });
+$("#p-days").addEventListener("change", loadPipeline);
+$("#p-new").onclick = () => $("#new").click();
+
+// ---------------------------------------------------------------- callbacks viewer
+let cbOpen = new Set();
+async function loadCallbacks() {
+  let all;
+  try { all = await api("GET", "/api/callbacks"); } catch (e) { $("#cb-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const f = $("#cb-filter").value, q = $("#cb-q").value.trim().toLowerCase();
+  const rows = all.filter(c => (!f || (f === "accepted" ? c.answeredWith === 200 : f === "refused" ? c.answeredWith !== 200
+      : f === "errors" ? c.contractErrors.length : !c.correlationId)) && (!q || `${c.aceJobId} ${c.correlationId || ""}`.toLowerCase().includes(q)));
+  $("#cb-totals").textContent = `${rows.length} of ${all.length} deliveries · ${new Set(all.map(c => c.aceJobId)).size} jobs · ${all.filter(c => c.contractErrors.length).length} with contract errors`;
+  $("#cb-table").innerHTML = rows.length ? `<div style="overflow-x:auto"><table><tr><th>received</th><th>aceJobId</th><th>execution</th><th>#</th><th>answered</th>
+    <th>status</th><th>batchPath</th><th>failed docs</th><th>contract</th></tr>
+    ${rows.map(c => { const p = c.payload || {}, s = p.status || {}, id = `${c.aceJobId}/${c.attempt}`;
+      return `<tr class="cb" data-cb="${esc(id)}"><td class="mono">${esc(c.receivedAt)}</td><td class="mono">${esc(c.aceJobId)}</td>
+      <td class="mono">${c.correlationId ? `<a href="#" data-go="${esc(c.correlationId)}">${esc(c.correlationId)}</a>` : chip("unknown job", "s-warn")}</td>
+      <td>${c.attempt}</td><td>${chip(c.answeredWith, c.answeredWith === 200 ? "s-ok" : "s-warn")}</td><td>${chip(`${s.code} ${s.value}`, CODE_CLASS(s.code))}</td>
+      <td class="mono">${esc(p.batchPath || "—")}</td><td>${(p.failedDocuments || []).length || ""}</td>
+      <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} errors`, "s-bad") : chip("ok", "s-ok")}</td></tr>
+      ${cbOpen.has(id) ? `<tr><td colspan="9"><pre>${J({payload: p, contractErrors: c.contractErrors, idempotencyKey: c.idempotencyKey, callerPrincipal: c.callerPrincipal, headers: c.headers})}</pre></td></tr>` : ""}`; }).join("")}
+    </table></div>` : `<div class="empty">No callbacks match.</div>`;
+}
+$("#cb-table").addEventListener("click", e => {
+  const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); return select(a.dataset.go); }
+  const r = e.target.closest("[data-cb]"); if (r) { const id = r.dataset.cb; cbOpen.has(id) ? cbOpen.delete(id) : cbOpen.add(id); loadCallbacks(); }
+});
+$("#cb-filter").addEventListener("change", loadCallbacks);
+$("#cb-q").addEventListener("input", () => { clearTimeout(loadCallbacks.h); loadCallbacks.h = setTimeout(loadCallbacks, 300); });
+
+// ---------------------------------------------------------------- default ACE endpoint
+function renderEnv() {
+  const el = $("#env-ace") || (() => { const s = document.createElement("span"); s.id = "env-ace"; $("#env").prepend(s); return s; })();
+  el.innerHTML = `ACE default ${esc(cfg.defaultAceUrl || "(not set)")}${cfg.defaultAceUrl !== cfg.integrationUrl ? " (changed)" : ""} <a href="#" id="ace-change">change</a>`;
+  $("#ace-change").onclick = e => { e.preventDefault(); $("#ace-url").value = cfg.defaultAceUrl || "";
+    $("#ace-env").textContent = cfg.integrationUrl || "(not set)"; $("#dlg-ace").showModal(); };
+}
+$("#ace-cancel").onclick = () => $("#dlg-ace").close();
+const saveAce = (btn, url) => act(btn, () => api("PUT", "/api/settings", {aceUrl: url}), "Default ACE endpoint saved")
+  .then(r => { if (r) { cfg = r; renderEnv(); $("#dlg-ace").close(); if (current) render(current); } });
+$("#ace-save").onclick = e => saveAce(e.target, $("#ace-url").value.trim());
+$("#ace-reset").onclick = e => saveAce(e.target, "");
 
 // ---------------------------------------------------------------- boot
 (async () => {
   try { cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message, true); }
-  $("#env").innerHTML = `<span>ACE ${esc(cfg.integrationUrl || "(not set)")}</span><span>intake s3://${esc(cfg.intakeBucket)}</span><span>output s3://${esc(cfg.outputBucket)}</span>`;
-  await loadList();
-  if (location.hash.length > 1) select(decodeURIComponent(location.hash.slice(1)));
-  setInterval(() => { if (!$("#view-exec").hidden) { loadList(); if (current && current.state !== "CLOSED" || !current) loadDetail(false); } }, 5000);
+  renderEnv();
+  $("#env").insertAdjacentHTML("beforeend", `<span>intake s3://${esc(cfg.intakeBucket)}</span><span>output s3://${esc(cfg.outputBucket)}</span>`);
+  if (location.hash.length > 1) { showTab("exec"); select(decodeURIComponent(location.hash.slice(1))); } else showTab("pipe");
+  setInterval(() => {
+    if (tab === "exec") { loadList(); if (current && current.state !== "CLOSED" || !current) loadDetail(false); }
+    else if (tab === "pipe") loadPipeline();
+  }, 10000);
 })();
 </script>
 </body>

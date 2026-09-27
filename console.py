@@ -144,14 +144,17 @@ def stage(cid):
     return update_batch(cid, change)
 
 
-def submit(cid, batch_path_mode="file", flaky=0):
-    """POST /integration/loan/onboarding (spec 4)."""
+def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
+    """POST /integration/loan/onboarding (spec 4) to ace_url, or the default ACE endpoint."""
     batch = get(cid)
+    ace_url = sim.check_ace_url(ace_url) if ace_url else sim.default_ace_url()
+    if not ace_url:
+        raise ValueError("no ACE endpoint: set a default or give one for this submission")
     if batch["state"] not in ("STAGED", "REJECTED"):
         raise Conflict(f"execution is {batch['state']}; write the control file first" if batch["state"] == "DRAFT" else f"execution is already {batch['state']}")
     batch_path = batch["folder"] if batch_path_mode == "folder" else batch["folder"] + batch["controlFileName"]
     request = {"loanId": batch["loanId"], "correlationId": batch["correlationId"], "batchPath": batch_path}
-    code, resp = sim.call("POST", "/integration/loan/onboarding", request)
+    code, resp = sim.call("POST", "/integration/loan/onboarding", request, base=ace_url)
     job = resp.get("aceJobId") if isinstance(resp, dict) else None
     if code == 202 and job:
         flaky = max(0, min(int(flaky or 0), 10))
@@ -163,9 +166,10 @@ def submit(cid, batch_path_mode="file", flaky=0):
 
     def change(b):
         b["batchPath"] = batch_path
+        b["aceUrl"] = ace_url
         if code == 202 and job:
             b.update(state="SUBMITTED", aceJobId=job, flaky=flaky, submittedAt=now_iso())
-            add_event(b, "submitted", f"onboarding -> HTTP 202, aceJobId {job}" + (f"; callback endpoint will refuse the first {flaky} deliveries" if flaky else ""),
+            add_event(b, "submitted", f"onboarding at {ace_url} -> HTTP 202, aceJobId {job}" + (f"; callback endpoint will refuse the first {flaky} deliveries" if flaky else ""),
                       request=request, response=resp)
             if not ack_ok:
                 msg = f"onboarding acknowledgement does not match spec 4.2: {resp}"
@@ -173,20 +177,22 @@ def submit(cid, batch_path_mode="file", flaky=0):
                 add_event(b, "contract-error", msg)
         else:
             b["state"] = "REJECTED"
-            add_event(b, "rejected", f"onboarding -> HTTP {code}", request=request, response=resp)
-    return update_batch(cid, change)
+            add_event(b, "rejected", f"onboarding at {ace_url} -> HTTP {code}", request=request, response=resp)
+    update_batch(cid, change)
+    sim.store_submission(cid, request, code, resp)
+    return get(cid)
 
 
 def hitl_review(cid):
     batch = get(cid)
-    code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]})
+    code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]}, base=batch.get("aceUrl"))
     return {"httpStatus": code, "review": body}
 
 
 def hitl_decide(cid, fields):
     """Acts as the ACE HITL reviewer (not an eOCR step) so a VALIDATION_FAILED or HITL path can be closed from here."""
     batch = get(cid)
-    code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields})
+    code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields}, base=batch.get("aceUrl"))
     rejected = [f["fieldName"] for f in fields if not f.get("isMatched")]
     update_batch(cid, lambda b: add_event(b, "hitl", f"HITL reviewer decision sent -> HTTP {code}; mismatched: {rejected or 'none'}", response=body))
     return {"httpStatus": code, "response": body}
@@ -199,7 +205,7 @@ def close(cid, note=""):
         raise Conflict("execution is already closed")
     body = None
     if batch.get("aceJobId"):
-        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}")
+        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"))
         body = body if code == 200 and isinstance(body, dict) else None
     st = (body or {}).get("status") or {}
     terminal = st.get("code") in sim.TERMINAL
@@ -222,7 +228,9 @@ def close(cid, note=""):
                             "batchPath": "", "failedDocuments": []}
         add_event(b, "closed", f"execution closed by {by}" + (f" from Status API {st.get('code')} {st.get('value')} (no callback received)" if terminal and not b.get("callback") else "")
                   + (f": {note}" if note else ""))
-    return update_batch(cid, change)
+    update_batch(cid, change)
+    sim.store_outcome(cid)
+    return get(cid)
 
 
 def resubmit(cid):
@@ -247,6 +255,7 @@ def detail(cid):
     batch.pop("terminalSeenAt", None)
     batch["callbacks"] = sim.callback_records(batch["aceJobId"]) if batch.get("aceJobId") else []
     batch["controlPreview"] = sim.build_control_file(batch)
+    batch["records"] = sim.list_records(cid)
     batch["s3"] = {"intake": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "output": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None}
     return batch
 
@@ -309,9 +318,16 @@ CID = r"/api/batches/(?P<cid>[A-Za-z0-9][A-Za-z0-9._-]{0,127})"
 
 @route("GET", r"/api/config")
 def _config(h, q):
-    return {"integrationUrl": sim.INTEGRATION_URL, "intakeBucket": INTAKE_BUCKET, "outputBucket": OUTPUT_BUCKET,
+    return {"integrationUrl": sim.INTEGRATION_URL, "defaultAceUrl": sim.default_ace_url(), "aceUrlAllowed": sim.ACE_URL_ALLOWED, "intakeBucket": INTAKE_BUCKET, "outputBucket": OUTPUT_BUCKET,
             "testData": f"s3://{sim.TESTDATA_BUCKET}/{sim.TESTDATA_PREFIX}", "callbackPort": sim.PORT, "trackIntervalSeconds": TRACK_INTERVAL_S,
             "callbackGraceSeconds": sim.CALLBACK_GRACE_S}
+
+
+@route("PUT", r"/api/settings")
+def _settings(h, q):
+    """{"aceUrl": "..."} sets the default ACE endpoint (stored in S3); an empty value goes back to ACE_URL_INTEGRATION."""
+    sim.save_default_ace_url((h.json().get("aceUrl") or "").strip())
+    return _config(h, q)
 
 
 @route("GET", r"/api/testloan")
@@ -321,7 +337,12 @@ def _testloan(h, q):
 
 @route("GET", r"/api/batches")
 def _list(h, q):
-    return sim.list_batches()
+    return sim.list_batches(q.get("q", ""), q.get("days") or None)
+
+
+@route("GET", r"/api/callbacks")
+def _callbacks(h, q):
+    return sim.list_callbacks(int(q.get("limit") or 500))
 
 
 @route("POST", r"/api/batches")
@@ -368,7 +389,7 @@ def _stage(h, q, cid):
 @route("POST", CID + r"/submit")
 def _submit(h, q, cid):
     b = h.json()
-    return submit(cid, b.get("batchPathMode", "file"), b.get("flaky", 0))
+    return submit(cid, b.get("batchPathMode", "file"), b.get("flaky", 0), (b.get("aceUrl") or "").strip() or None)
 
 
 @route("POST", CID + r"/refresh")
@@ -402,7 +423,22 @@ def _response(h, q, cid):
     key = (batch.get("outcome") or {}).get("batchPath") or (batch.get("status") or {}).get("batchPath")
     if not key:
         raise KeyError("no Response.json for this execution")
-    return json.loads(s3.get_object(Bucket=OUTPUT_BUCKET, Key=key)["Body"].read())
+    try:
+        return json.loads(s3.get_object(Bucket=OUTPUT_BUCKET, Key=key)["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        if not batch.get("responseCopy"):
+            raise KeyError(f"{key} is gone from the output bucket and no copy was stored") from None
+        return sim.read_record(cid, batch["responseCopy"].rsplit("/", 1)[-1])
+
+
+@route("GET", CID + r"/records")
+def _records(h, q, cid):
+    return sim.list_records(cid)
+
+
+@route("GET", CID + r"/records/(?P<name>[^/]+)")
+def _record(h, q, cid, name):
+    return sim.read_record(cid, urllib.parse.unquote(name))
 
 
 @route("GET", r"/api/reports")

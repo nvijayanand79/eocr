@@ -303,17 +303,66 @@ def update_batch(cid, change):
     raise RuntimeError(f"could not update execution {cid}: too many concurrent writers")
 
 
-def list_batches(limit=200):
+_summaries = {}  # batch key -> (ETag, summary): the ledger only grows, so re-read only what changed
+
+
+def _summary(b):
+    st = b.get("status") or {}
+    return {k: b.get(k) for k in ("correlationId", "loanId", "aceJobId", "state", "source", "createdAt", "updatedAt", "submittedAt",
+                                  "closedAt", "closedBy", "callbackOverdue", "resubmissionOf", "outcomeRecord", "aceUrl")} \
+        | {"status": st.get("status"), "workflow": st.get("workflow"), "outcome": b.get("outcome"),
+           "documents": len(b.get("documents") or []), "resultOk": (b.get("result") or {}).get("ok"),
+           "callbackAt": (b.get("callback") or {}).get("receivedAt"), "callbackAttempts": (b.get("callback") or {}).get("attempt"),
+           "contractErrors": len(set(b.get("contractErrors") or []) | set((b.get("callback") or {}).get("contractErrors") or [])
+                                 | set((b.get("result") or {}).get("errors") or [])),
+           "lastEvent": ((b.get("events") or [None])[-1] or {}).get("message")}
+
+
+def list_batches(q="", since_days=None, limit=2000):
+    """Every execution in the ledger, newest first; q matches loanId, correlationId or aceJobId."""
     objs = []
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=INTAKE_BUCKET, Prefix=BATCH_PREFIX):
+        objs += [o for o in page.get("Contents", []) if o["Key"].endswith(".json")]
+    if since_days:
+        cutoff = datetime.now(timezone.utc).timestamp() - float(since_days) * 86400
+        objs = [o for o in objs if o["LastModified"].timestamp() >= cutoff]
+    objs.sort(key=lambda o: o["LastModified"], reverse=True)
+    q = (q or "").strip().lower()
+    out = []
+    for o in objs:
+        cached = _summaries.get(o["Key"])
+        if not cached or cached[0] != o["ETag"]:
+            cached = (o["ETag"], _summary(json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())))
+            _summaries[o["Key"]] = cached
+        summary = cached[1]
+        if q and not any(q in str(summary.get(k) or "").lower() for k in ("loanId", "correlationId", "aceJobId")):
+            continue
+        out.append(summary)
+        if len(out) >= limit:
+            break
+    return out
+
+
+_callbacks, _job_cid = {}, {}  # callback records never change once written; job -> execution never changes once known
+
+
+def list_callbacks(limit=500):
+    """Every callback delivery the eOCR endpoint received (all jobs, known or not), newest first."""
+    objs = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=INTAKE_BUCKET, Prefix=f"{SIM_PREFIX}callbacks/"):
         objs += [o for o in page.get("Contents", []) if o["Key"].endswith(".json")]
     objs.sort(key=lambda o: o["LastModified"], reverse=True)
     out = []
     for o in objs[:limit]:
-        b = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())
-        out.append({k: b.get(k) for k in ("correlationId", "loanId", "aceJobId", "state", "source", "createdAt", "updatedAt", "closedBy")}
-                   | {"status": (b.get("status") or {}).get("status"), "workflow": (b.get("status") or {}).get("workflow"),
-                      "outcome": b.get("outcome"), "documents": len(b.get("documents") or []), "resultOk": (b.get("result") or {}).get("ok")})
+        if o["Key"] not in _callbacks:
+            _callbacks[o["Key"]] = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())
+        rec = _callbacks[o["Key"]]
+        job = o["Key"].split("/")[-2]
+        if job not in _job_cid:
+            cid = batch_for_job(job)
+            if cid:
+                _job_cid[job] = cid
+        out.append({"aceJobId": job, "correlationId": _job_cid.get(job), **rec})
     return out
 
 
@@ -357,6 +406,128 @@ def retrieve_result(batch, code, batch_path):
     return {"ok": not errs, "key": f"s3://{OUTPUT_BUCKET}/{batch_path}", "errors": errs, "summary": response_summary(doc) if isinstance(doc, dict) else None}
 
 
+SETTINGS_KEY = f"{SIM_PREFIX}settings.json"
+ACE_URL_ALLOWED = [u.strip().rstrip("/") for u in os.environ.get("SIM_ACE_URL_ALLOWED", "").split(",") if u.strip()]
+
+
+def settings():
+    try:
+        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=SETTINGS_KEY)["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        return {}
+
+
+def check_ace_url(url):
+    """An ACE integration endpoint: http(s)://host[:port][/base], and inside SIM_ACE_URL_ALLOWED when that is set."""
+    url = str(url or "").strip().rstrip("/")
+    if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(:\d{1,5})?(/[A-Za-z0-9._~/-]*)?", url):
+        raise ValueError(f"ACE endpoint must look like https://host[:port][/path], got '{url}'")
+    if ACE_URL_ALLOWED and not any(url == a or url.startswith(a + "/") or url.startswith(a + ":") for a in ACE_URL_ALLOWED):
+        raise ValueError(f"ACE endpoint {url} is not in SIM_ACE_URL_ALLOWED")
+    return url
+
+
+def default_ace_url():
+    """The console's default ACE endpoint: the one saved from the console, else ACE_URL_INTEGRATION."""
+    return settings().get("aceUrl") or INTEGRATION_URL
+
+
+def save_default_ace_url(url):
+    doc = settings()
+    if url:
+        doc.update(aceUrl=check_ace_url(url), aceUrlChangedAt=now_iso())
+    else:
+        doc.pop("aceUrl", None)
+    s3.put_object(Bucket=INTAKE_BUCKET, Key=SETTINGS_KEY, Body=json.dumps(doc, indent=2).encode(), ContentType="application/json")
+    return doc
+
+
+RECORD_PREFIX = f"{SIM_PREFIX}records/"   # immutable per-execution records: what was submitted, how it ended
+
+
+def _put_record(cid, name, doc):
+    key = f"{RECORD_PREFIX}{cid}/{name}"
+    s3.put_object(Bucket=INTAKE_BUCKET, Key=key, Body=json.dumps(doc, indent=2, default=str).encode(), ContentType="application/json")
+    return key
+
+
+def store_submission(cid, request, http_status, response):
+    """Freeze exactly what was submitted: request/response, the control file as ACE will read it, every document's size and ETag."""
+    batch, _ = load_batch(cid)
+    docs = []
+    for d in batch["documents"]:
+        key = batch["folder"] + d["fileName"]
+        try:
+            h = s3.head_object(Bucket=INTAKE_BUCKET, Key=key)
+            docs.append({"fileName": d["fileName"], "contentType": d["contentType"], "s3Key": f"s3://{INTAKE_BUCKET}/{key}",
+                         "bytes": h["ContentLength"], "etag": h["ETag"].strip('"'), "lastModified": h["LastModified"].isoformat()})
+        except Exception as exc:
+            docs.append({"fileName": d["fileName"], "s3Key": f"s3://{INTAKE_BUCKET}/{key}", "missing": f"{type(exc).__name__}: {exc}"})
+    control_key = batch["folder"] + batch["controlFileName"]
+    try:
+        control = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=control_key)["Body"].read())
+    except Exception as exc:
+        control = {"unreadable": f"{type(exc).__name__}: {exc}"}
+    at = now_iso()
+    record = {"correlationId": cid, "loanId": batch["loanId"], "source": batch["source"], "submittedAt": at,
+              "aceUrl": batch.get("aceUrl") or INTEGRATION_URL, "endpoint": "POST /integration/loan/onboarding", "request": request, "httpStatus": http_status, "response": response,
+              "aceJobId": response.get("aceJobId") if isinstance(response, dict) else None,
+              "controlFileKey": f"s3://{INTAKE_BUCKET}/{control_key}", "controlFile": control, "documents": docs}
+    key = _put_record(cid, f"submission-{at.replace(':', '')}.json", record)
+
+    def change(b):
+        b["submission"] = {"key": key, "at": at, "httpStatus": http_status, "aceJobId": record["aceJobId"], "documents": len(docs),
+                           "bytes": sum(d.get("bytes", 0) for d in docs)}
+        add_event(b, "stored", f"submission stored: s3://{INTAKE_BUCKET}/{key}")
+    update_batch(cid, change)
+    return record
+
+
+def store_outcome(cid):
+    """Freeze how the execution ended, with a copy of *Response.json that outlives the output bucket's retention."""
+    batch, _ = load_batch(cid)
+    if not batch or batch["state"] != "CLOSED" or batch.get("outcomeRecord"):
+        return
+    copy = None
+    source = (batch.get("outcome") or {}).get("batchPath")
+    if source:
+        try:
+            copy = f"{RECORD_PREFIX}{cid}/{source.rsplit('/', 1)[-1]}"
+            s3.copy_object(Bucket=INTAKE_BUCKET, Key=copy, CopySource={"Bucket": OUTPUT_BUCKET, "Key": source})
+        except Exception as exc:
+            log("Response.json copy failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
+            copy = None
+    record = {"correlationId": cid, "loanId": batch["loanId"], "aceJobId": batch.get("aceJobId"), "submission": batch.get("submission"),
+              "closedAt": batch["closedAt"], "closedBy": batch["closedBy"], "outcome": batch["outcome"],
+              "callbackAccepted": batch.get("callback"), "callbackAttempts": callback_records(batch["aceJobId"]) if batch.get("aceJobId") else [],
+              "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
+              "responseFileCopy": f"s3://{INTAKE_BUCKET}/{copy}" if copy else None,
+              "contractErrors": sorted(set(batch.get("contractErrors") or []) | set((batch.get("callback") or {}).get("contractErrors") or [])
+                                       | set((batch.get("result") or {}).get("errors") or []))}
+    key = _put_record(cid, "outcome.json", record)
+
+    def change(b):
+        b["outcomeRecord"] = key
+        b["responseCopy"] = copy
+        add_event(b, "stored", f"outcome stored: s3://{INTAKE_BUCKET}/{key}" + (f"; Response.json copied to s3://{INTAKE_BUCKET}/{copy}" if copy else ""))
+    update_batch(cid, change)
+
+
+def list_records(cid):
+    objs = s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=f"{RECORD_PREFIX}{cid}/").get("Contents", [])
+    return [{"name": o["Key"].rsplit("/", 1)[-1], "key": f"s3://{INTAKE_BUCKET}/{o['Key']}", "bytes": o["Size"],
+             "storedAt": o["LastModified"].isoformat()} for o in sorted(objs, key=lambda o: o["Key"])]
+
+
+def read_record(cid, name):
+    if not SAFE_FILE.fullmatch(name):
+        raise KeyError(name)
+    try:
+        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{RECORD_PREFIX}{cid}/{name}")["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        raise KeyError(name) from None
+
+
 def record_status(batch, body, source="tracker"):
     """Fold one Status API response into the execution: stage transitions, contract errors, terminal notice."""
     for e in check_status_response(body, batch["aceJobId"]):
@@ -387,7 +558,7 @@ def refresh_status(cid, source="tracker"):
         raise KeyError(cid)
     if not batch.get("aceJobId"):
         raise Conflict("execution has no aceJobId yet")
-    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}")
+    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"))
     if code != 200 or not isinstance(body, dict):
         return update_batch(cid, lambda b: add_event(b, "error", f"Status API -> HTTP {code}", body=body))
     return update_batch(cid, lambda b: record_status(b, body, source))
@@ -423,7 +594,7 @@ def on_callback(job_id, record):
         return
     result = retrieve_result(batch, st.get("code"), p.get("batchPath"))
     try:  # eOCR validates the callback against the Status API before closing
-        code, body = call("GET", f"/integration/loan/status/{job_id}")
+        code, body = call("GET", f"/integration/loan/status/{job_id}", base=batch.get("aceUrl"))
     except Exception as exc:
         code, body = None, f"{type(exc).__name__}: {exc}"
 
@@ -445,6 +616,7 @@ def on_callback(job_id, record):
         add_event(b, "closed", f"execution closed on callback: {st.get('code')} {st.get('value')}")
 
     update_batch(cid, close)
+    store_outcome(cid)
 
 
 # ------------------------------------------------------------------ callback receiver (serve)
@@ -498,6 +670,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 "answeredWith": answered,
                 "callerPrincipal": principal.group(1) if principal else None,
                 "idempotencyKey": self.headers.get("Idempotency-Key"),
+                "headers": {k: v for k, v in self.headers.items() if k.lower() not in ("authorization", "x-amz-security-token", "cookie")},
                 "contractErrors": check_callback(payload),
                 "payload": payload,
             }
@@ -534,8 +707,9 @@ def serve():
 
 # ------------------------------------------------------------------ ACE API client (SigV4 over VPC Lattice)
 
-def call(method, path, body=None, expect=None):
-    url = INTEGRATION_URL + path
+def call(method, path, body=None, expect=None, base=None):
+    """base: the ACE integration endpoint to call (default ACE_URL_INTEGRATION)."""
+    url = (base or INTEGRATION_URL).rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Accept": "application/json", "x-amz-content-sha256": "UNSIGNED-PAYLOAD"}
     if data is not None:
@@ -709,9 +883,13 @@ class Scenario:
         index_job(self.job, self.correlation_id)
 
         def submitted(b):
-            b.update(state="SUBMITTED", aceJobId=self.job, batchPath=self.batch_path, flaky=self.flaky, submittedAt=now_iso())
+            b.update(state="SUBMITTED", aceJobId=self.job, batchPath=self.batch_path, flaky=self.flaky, submittedAt=now_iso(), aceUrl=INTEGRATION_URL)
             add_event(b, "submitted", f"onboarding -> HTTP 202, aceJobId {self.job}", request=body, response=resp)
         self.trace(submitted)
+        try:
+            store_submission(self.correlation_id, body, code, resp)
+        except Exception as exc:
+            log("submission record failed", scenario=self.name, error=f"{type(exc).__name__}: {exc}")
         # idempotency: the same request again returns the same job
         _, again = call("POST", "/integration/loan/onboarding", body, expect=202)
         if again.get("aceJobId") != self.job:

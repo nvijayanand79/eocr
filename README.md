@@ -44,8 +44,38 @@ step traced end to end:
 | 6. Callback | every delivery attempt: HTTP answer, caller principal, Idempotency-Key, contract errors | 5, 6 |
 | 7. Close | on the accepted callback: fetch and check `*Response.json`, compare with the Status API, close. **Close...** reconciles by hand when no callback comes (Status API terminal -> result retrieved; otherwise ABANDONED). A late callback after that is recorded, not re-processed | 3.3, 6.4, 6.5, 7 |
 
-"Resubmit as new execution" copies the package into a new `correlationId`. The **Scenario reports** tab lists
-`run` reports; scenario runs also write their executions into the same ledger, so they show up in the console too.
+"Resubmit as new execution" copies the package into a new `correlationId`.
+
+Views, for coming back days later:
+
+| Tab | Shows |
+|---|---|
+| **Pipeline** | every execution as a board: Draft, Staged, Processing in ACE, Awaiting callback, Closed completed, Closed failed, Rejected. Search by loanId / correlationId / aceJobId and pick a period (24h, 7d, 30d, all). Flags: *no callback* (Status API terminal but no callback after the grace period), *no change 24h+* for open executions, contract errors, closed by hand |
+| **Executions** | one execution in full: stepper, documents, control file, onboarding, stage history, callbacks (every attempt with payload, headers and checks), result, contract checks, **stored records**, timeline |
+| **Callbacks** | every delivery the eOCR endpoint received across all jobs, including unknown aceJobIds; filter by accepted / refused / contract errors / unknown; click a row for payload, headers, Idempotency-Key and checks |
+| **Scenario reports** | `run` reports; scenario runs also write their executions into the ledger, so they are on the board too |
+
+### ACE endpoint
+
+The console's default ACE endpoint is `ACE_URL_INTEGRATION`, and it can be changed from the header ("change"); the new
+default is saved in `s3://<intake>/eocr-sim/settings.json` and "Use environment default" goes back. Each submission can
+name another endpoint. The execution stores the endpoint it was submitted to (also in its submission record), and the
+tracker, HITL, close and callback reconciliation for that execution all use it. Set `SIM_ACE_URL_ALLOWED`
+(comma-separated base URLs) to restrict which endpoints may be used: the simulator signs its calls with its task role.
+
+### What is stored (all in the intake bucket, nothing on local disk)
+
+| Key | Written | Holds |
+|---|---|---|
+| `eocr-sim/batches/<correlationId>.json` | on every step | the execution's live state and timeline |
+| `eocr-sim/records/<correlationId>/submission-<time>.json` | on each onboarding call, never changed | ACE endpoint, request, HTTP status and response, the control file as ACE reads it, each document's S3 key, size and ETag |
+| `eocr-sim/records/<correlationId>/outcome.json` | once, on close | outcome, accepted callback, every delivery attempt, Status API at close, stage history, Response.json checks, contract errors |
+| `eocr-sim/records/<correlationId>/<name>Response.json` | once, on close | copy of ACE's `*Response.json`, so the result is still there after the output bucket's retention |
+| `eocr-sim/callbacks/<aceJobId>/NNN.json` | per delivery | payload, headers, answer, checks |
+| `eocr-sim/jobs/<aceJobId>.json`, `eocr-sim/active/`, `eocr-sim/settings.json` | | job -> execution index, executions being polled, console settings |
+
+The console reads everything back from S3 (with in-memory caches keyed by ETag), so a restarted or replaced task shows
+the same history.
 
 Each execution is one JSON document, `s3://<intake>/eocr-sim/batches/<correlationId>.json` (state, control file,
 documents, aceJobId, stage history, callback, result, outcome and a timeline of events). Writes use S3 conditional
@@ -76,6 +106,7 @@ the intake bucket, read the output bucket and the test data.
 | `SIM_TRACK_INTERVAL_SECONDS` | `15` | Status API polling of open executions |
 | `SIM_CALLBACK_GRACE_SECONDS` | `600` | after the Status API goes terminal, how long before "no callback" is flagged |
 | `SIM_MAX_UPLOAD_MB` | `512` | per file |
+| `SIM_ACE_URL_ALLOWED` | (any) | comma-separated ACE base URLs a submission or the default may use |
 
 ### Trying it locally (no AWS)
 
