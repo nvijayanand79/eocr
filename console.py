@@ -10,6 +10,7 @@ by default, so it is never exposed through the VPC Lattice callback service; rea
 import json
 import os
 import re
+import secrets
 import threading
 import time
 import traceback
@@ -17,6 +18,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import eocr_sim as sim
+import store
 from eocr_sim import s3, INTAKE_BUCKET, OUTPUT_BUCKET, SIM_PREFIX, Conflict, add_event, now_iso, update_batch, load_batch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,12 +35,20 @@ CONTENT_TYPES = {".pdf": "application/pdf", ".tif": "image/tiff", ".tiff": "imag
 #                identity cannot be forged even by someone who reaches the port directly. No sign-in screen.
 # SIM_AUTH=name  (default) a sign-in screen that asks for a name and keeps it in a cookie. It records who did what;
 #                it is not authentication, which is why the console then stays on loopback behind SSM.
+# SIM_AUTH=ace   ACE users sign in with their ACE user ID/e-mail and password. The ONLY thing shared with ACE is its
+#                user table, read only (active users, BCrypt hash, as ACE's own login checks it). The console has its
+#                own session (random token in an HttpOnly cookie, stored hashed in the simulator's schema), its own
+#                sign-in log and lock-out; it never calls ACE's auth service or uses ACE tokens.
 
 AUTH = os.environ.get("SIM_AUTH", "name").lower()
 ALB_ARN = os.environ.get("SIM_ALB_ARN", "")
 OIDC_KEY_URL = os.environ.get("SIM_OIDC_KEY_URL", "https://public-keys.auth.elb.{region}.amazonaws.com/{kid}")
 OIDC_CLAIMS = [c.strip() for c in os.environ.get("SIM_OIDC_USER_CLAIMS", "email,preferred_username,name,sub").split(",") if c.strip()]
 COOKIE = "eocr_user"
+SESSION_COOKIE = "eocr_session"
+SESSION_HOURS = int(os.environ.get("SIM_SESSION_HOURS", "8"))
+MAX_FAILURES = 5  # per login or client address in 15 minutes
+BASE = os.environ.get("SIM_BASE_PATH", "").rstrip("/")  # e.g. /eocr-sim when served behind CloudFront + ALB
 _alb_keys = {}
 
 
@@ -81,7 +91,54 @@ def clean_name(value):
     return re.sub(r"[^\w .@'-]", "", str(value or ""))[:64].strip()
 
 
+def client_ip(handler):
+    forwarded = handler.headers.get("X-Forwarded-For") or ""
+    return (forwarded.split(",")[0].strip() or handler.client_address[0])[:64]
+
+
+def _cookies(handler):
+    from http.cookies import SimpleCookie
+    jar = SimpleCookie()
+    try:
+        jar.load(handler.headers.get("Cookie") or "")
+    except Exception:
+        pass
+    return jar
+
+
+def ace_sign_in(handler, login, password):
+    """Check an ACE user's credentials against ACE's user table (read only) and open a console session."""
+    import bcrypt
+    login = str(login or "").strip()[:200]
+    ip = client_ip(handler)
+    db = store.get()
+    if not login or not password:
+        raise ValueError("enter your ACE user ID and password")
+    if db.recent_failures(login, ip) >= MAX_FAILURES:
+        db.record_sign_in(login, None, False, "locked out", ip)
+        raise Conflict("too many failed sign-ins; wait 15 minutes")
+    user = db.ace_user(login)
+    ok = bool(user and user["hash"] and user["hash"].startswith("$2")
+              and bcrypt.checkpw(password.encode("utf-8"), user["hash"].replace("$2y$", "$2b$", 1).encode("utf-8")))
+    db.record_sign_in(login, user["userId"] if user else None, ok, None if ok else ("unknown or inactive user" if not user else "wrong password"), ip)
+    if not ok:
+        sim.log("console sign-in refused", login=login[:3] + "***", ip=ip)
+        raise PermissionError("user ID or password is not correct")
+    token = secrets.token_urlsafe(32)
+    display = f"{user['name']} ({user['userId']})"
+    db.create_session(store.token_hash(token), user["userId"], display, SESSION_HOURS, ip)
+    handler.cookie = f"{SESSION_COOKIE}={token}; Path={BASE or '/'}; Max-Age={SESSION_HOURS * 3600}; HttpOnly; Secure; SameSite=Strict"
+    sim.log("console sign-in", user=user["userId"], ip=ip)
+    return display
+
+
 def current_user(handler):
+    if AUTH == "ace":
+        jar = _cookies(handler)
+        if SESSION_COOKIE not in jar:
+            return None
+        s = store.get().session(store.token_hash(jar[SESSION_COOKIE].value))
+        return s["name"] if s else None
     if AUTH == "oidc":
         token = handler.headers.get("x-amzn-oidc-data")
         return oidc_user(token) if token else None
@@ -229,7 +286,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
     if accepted:
         flaky = max(0, min(int(flaky or 0), 10))
         if flaky:
-            s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{job}", Body=json.dumps({"refuse": flaky}).encode())
+            store.put_json(f"{SIM_PREFIX}flaky/{job}", {"refuse": flaky})
         sim.index_job(job, cid)
     ack_errors = []
     if 200 <= code < 300:
@@ -356,11 +413,11 @@ def detail(cid):
 
 
 def reports():
-    objs = s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=f"{SIM_PREFIX}reports/").get("Contents", [])
+    objs = store.get().list(f"{SIM_PREFIX}reports/")
     out = []
-    for o in sorted(objs, key=lambda o: o["Key"], reverse=True)[:30]:
-        r = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())
-        out.append({"key": o["Key"], "finishedAt": r.get("finishedAt"), "passed": r.get("passed"),
+    for o in sorted(objs, key=lambda o: o.key, reverse=True)[:30]:
+        r = store.get_json(o.key)[0]
+        out.append({"key": o.key, "finishedAt": r.get("finishedAt"), "passed": r.get("passed"),
                     "results": [{k: x.get(k) for k in ("scenario", "passed", "aceJobId", "correlationId", "minutes", "errors", "checks")} for x in r.get("results", [])]})
     return out
 
@@ -370,13 +427,13 @@ def reports():
 def tracker():
     while True:
         try:
-            keys = [o["Key"] for o in s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=sim.ACTIVE_PREFIX).get("Contents", [])]
+            keys = [o.key for o in store.get().list(sim.ACTIVE_PREFIX)]
             for key in keys:
                 cid = key[len(sim.ACTIVE_PREFIX):]
                 try:
                     sim.refresh_status(cid)
                 except KeyError:
-                    s3.delete_object(Bucket=INTAKE_BUCKET, Key=key)
+                    store.get().delete(key)
                 except Exception as exc:
                     sim.log("tracker: status refresh failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
         except Exception:
@@ -421,6 +478,9 @@ def _me(h, q):
 
 @route("POST", r"/api/login")
 def _login(h, q):
+    if AUTH == "ace":
+        body = h.json()
+        return {"user": ace_sign_in(h, body.get("login"), body.get("password")), "mode": AUTH}
     if AUTH != "name":
         raise Conflict("sign-in is handled by single sign-on")
     name = clean_name(h.json().get("name"))
@@ -433,6 +493,12 @@ def _login(h, q):
 
 @route("POST", r"/api/logout")
 def _logout(h, q):
+    if AUTH == "ace":
+        jar = _cookies(h)
+        if SESSION_COOKIE in jar:
+            store.get().end_session(store.token_hash(jar[SESSION_COOKIE].value))
+        h.cookie = f"{SESSION_COOKIE}=; Path={BASE or '/'}; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
+        return {"user": None, "mode": AUTH}
     h.cookie = f"{COOKIE}=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly"
     return {"user": None, "mode": AUTH}
 
@@ -663,6 +729,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Strict-Transport-Security", "max-age=31536000")
         if filename:
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         if getattr(self, "cookie", None):
@@ -672,9 +742,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         url = urllib.parse.urlsplit(self.path)
+        if BASE:
+            if url.path == BASE:
+                self.send_response(301)
+                self.send_header("Location", BASE + "/")
+                self.end_headers()
+                return
+            if not url.path.startswith(BASE + "/"):
+                return self._send(404, {"error": "not found"})
+            url = url._replace(path=url.path[len(BASE):])
+        if method == "GET" and url.path == "/health":
+            return self._send(200, {"status": "UP"})
         if method == "GET" and url.path in ("/", "/index.html"):
             with open(os.path.join(HERE, "console.html"), "rb") as f:
-                return self._send(200, f.read(), "text/html; charset=utf-8")
+                page = f.read().replace(b"<head>", f'<head><meta name="eocr-base" content="{BASE}">'.encode(), 1)
+            return self._send(200, page, "text/html; charset=utf-8")
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
         for m, pattern, fn in ROUTES:
             match = pattern.match(url.path)
@@ -692,6 +774,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": f"not found: {exc.args[0] if exc.args else ''}"})
                 except Conflict as exc:
                     return self._send(409, {"error": str(exc)})
+                except PermissionError as exc:
+                    return self._send(403, {"error": str(exc), "mode": AUTH})
                 except (ValueError, TypeError) as exc:
                     return self._send(400, {"error": str(exc)})
                 except Exception as exc:

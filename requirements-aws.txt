@@ -1,4 +1,5 @@
 boto3>=1.36  # S3 conditional writes (IfMatch / IfNoneMatch)
 pypdf>=5.0
 cryptography>=43
-
+psycopg[binary]>=3.2  # SIM_STORE=db: the simulator's own schema in the environment database
+bcrypt>=4.2  # SIM_AUTH=ace: checks ACE users' BCrypt password hashes

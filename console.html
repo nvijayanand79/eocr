@@ -246,7 +246,8 @@ dialog h3 { margin: 0 0 12px; }
 <div id="login" hidden><form class="box" id="login-form">
   <h2>eOCR Simulator Console</h2>
   <p id="login-text">Sign in with your name. It is recorded on everything you create, submit or close, so others can see who ran what.</p>
-  <label for="login-name">Your name</label><input id="login-name" autocomplete="name" maxlength="64" required>
+  <label for="login-name" id="login-name-label">Your name</label><input id="login-name" autocomplete="name" maxlength="200" required>
+  <label for="login-password" id="login-password-label" hidden>Password</label><input id="login-password" type="password" autocomplete="current-password" maxlength="200" hidden>
   <button class="primary" type="submit">Sign in</button>
   <p id="login-note" style="margin:12px 0 0">This sign-in records who you are; it does not check a password. Use single sign-on (SIM_AUTH=oidc) for real authentication.</p>
 </form></div>
@@ -261,11 +262,13 @@ const fmt = n => (n ?? 0).toLocaleString();
 const J = v => esc(JSON.stringify(v, null, 2));
 let current = null, selected = null, controlDirty = false, rawMode = false, cfg = {};
 
+// The console may be served under a path prefix (e.g. /eocr-sim behind CloudFront); the server says which.
+const BASE = (document.querySelector('meta[name="eocr-base"]') || {}).content || "";
 async function api(method, path, body, raw) {
   const opt = {method, headers: {}, credentials: "same-origin"};
   if (raw) { opt.body = raw; opt.headers["Content-Type"] = raw.type || "application/octet-stream"; }
   else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
-  const r = await fetch(path, opt);
+  const r = await fetch(BASE + path, opt);
   const data = await r.json().catch(() => ({error: `HTTP ${r.status}`}));
   if (r.status === 401) { showLogin(data.mode); throw new Error("Please sign in"); }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -793,8 +796,8 @@ $("#board").addEventListener("click", e => { const m = e.target.closest("[data-m
   if (e.target.id === "clear-f") { e.preventDefault(); pipeFilter = ""; loadPipeline(); } });
 $("#stats").addEventListener("click", e => { const t = e.target.closest(".stat.click"); if (t) { pipeFilter = pipeFilter === t.dataset.f ? "" : t.dataset.f; loadPipeline(); } });
 $("#p-mine").addEventListener("change", loadPipeline);
-$("#p-csv").onclick = () => { location.href = `/api/export/executions.csv?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`; };
-$("#cb-csv").onclick = () => { location.href = "/api/export/callbacks.csv"; };
+$("#p-csv").onclick = () => { location.href = BASE + `/api/export/executions.csv?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`; };
+$("#cb-csv").onclick = () => { location.href = BASE + "/api/export/callbacks.csv"; };
 function updateBadge(t, n) { const el = $("#bdg-" + t); el.textContent = n; el.hidden = !n; el.title = t === "pipe" ? "executions needing attention" : "callbacks with spec deviations or for unknown jobs"; }
 $("#board").addEventListener("click", e => { const c = e.target.closest("[data-go]"); if (c) { showTab("exec"); select(c.dataset.go); } });
 $("#p-q").addEventListener("input", () => { clearTimeout(loadPipeline.h); loadPipeline.h = setTimeout(loadPipeline, 300); });
@@ -853,6 +856,14 @@ function showLogin(mode) {
     $("#login-text").textContent = "Your single sign-on session has ended. Reload the page to sign in again.";
     $("#login-form").querySelectorAll("input,label,button,#login-note").forEach(el => el.hidden = true);
   }
+  if (authMode === "ace") {
+    $("#login-text").textContent = "Sign in with your ACE user ID (or e-mail) and password. The simulator only checks them against the ACE user list; it has its own session and keeps its data apart from ACE.";
+    $("#login-name-label").textContent = "ACE user ID or e-mail";
+    $("#login-name").setAttribute("autocomplete", "username");
+    $("#login-password").hidden = $("#login-password-label").hidden = false;
+    $("#login-password").required = true;
+    $("#login-note").hidden = true;
+  }
   $("#login").hidden = false; setTimeout(() => $("#login-name").focus(), 50);
 }
 function signedIn(u) {
@@ -860,7 +871,9 @@ function signedIn(u) {
   $("#logout").hidden = authMode === "oidc";
 }
 $("#login-form").onsubmit = async e => { e.preventDefault();
-  const r = await act(e.submitter, () => api("POST", "/api/login", {name: $("#login-name").value}));
+  const body = authMode === "ace" ? {login: $("#login-name").value.trim(), password: $("#login-password").value} : {name: $("#login-name").value};
+  const r = await act(e.submitter, () => api("POST", "/api/login", body));
+  $("#login-password").value = "";
   if (r) { signedIn(r.user); boot(); } };
 $("#logout").onclick = async e => { e.preventDefault(); await api("POST", "/api/logout").catch(() => {}); user = null; location.hash = ""; location.reload(); };
 $("#help").onclick = () => $("#dlg-help").showModal();

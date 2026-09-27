@@ -34,6 +34,8 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 from pypdf import PdfReader, PdfWriter
 
+import store
+
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 INTEGRATION_URL = os.environ.get("ACE_URL_INTEGRATION", "").rstrip("/")
 INTAKE_BUCKET = os.environ.get("ACE_BUCKET_INTAKE", "")
@@ -423,7 +425,7 @@ def new_correlation_id():
 
 
 def _precondition_failed(exc):
-    return getattr(exc, "response", {}).get("Error", {}).get("Code") in ("PreconditionFailed", "ConditionalRequestConflict")
+    return isinstance(exc, store.PreconditionFailed) or getattr(exc, "response", {}).get("Error", {}).get("Code") in ("PreconditionFailed", "ConditionalRequestConflict")
 
 
 OPERATOR = threading.local()  # the console sets .name for the request it is serving: who did it goes into every event
@@ -441,21 +443,18 @@ def add_event(batch, kind, message, **data):
 
 def load_batch(cid):
     try:
-        obj = s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{BATCH_PREFIX}{cid}.json")
-    except s3.exceptions.NoSuchKey:
+        return store.get_json(f"{BATCH_PREFIX}{cid}.json")
+    except KeyError:
         return None, None
-    return json.loads(obj["Body"].read()), obj["ETag"]
 
 
 def _save(batch, etag):
-    extra = {"IfMatch": etag} if etag else {"IfNoneMatch": "*"}
-    s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{BATCH_PREFIX}{batch['correlationId']}.json", Body=json.dumps(batch, indent=2, default=str).encode(),
-                  ContentType="application/json", **extra)
+    store.put_json(f"{BATCH_PREFIX}{batch['correlationId']}.json", batch, **({"if_match": etag} if etag else {"if_none_match": True}))
     marker = f"{ACTIVE_PREFIX}{batch['correlationId']}"
     if batch["state"] in TRACKED and batch.get("track", True):
-        s3.put_object(Bucket=INTAKE_BUCKET, Key=marker, Body=b"")
+        store.get().put(marker, b"", "text/plain")
     else:
-        s3.delete_object(Bucket=INTAKE_BUCKET, Key=marker)
+        store.get().delete(marker)
 
 
 def create_batch(loan_id, correlation_id=None, loan_info=None, extraction_required=True, control_file_name="controlfile.json", source="console", track=True):
@@ -526,20 +525,21 @@ def _summary(b):
 
 def list_batches(q="", since_days=None, limit=2000):
     """Every execution in the ledger, newest first; q matches loanId, correlationId or aceJobId."""
-    objs = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=INTAKE_BUCKET, Prefix=BATCH_PREFIX):
-        objs += [o for o in page.get("Contents", []) if o["Key"].endswith(".json")]
+    objs = [o for o in store.get().list(BATCH_PREFIX) if o.key.endswith(".json")]
     if since_days:
         cutoff = datetime.now(timezone.utc).timestamp() - float(since_days) * 86400
-        objs = [o for o in objs if o["LastModified"].timestamp() >= cutoff]
-    objs.sort(key=lambda o: o["LastModified"], reverse=True)
+        objs = [o for o in objs if o.modified.timestamp() >= cutoff]
+    objs.sort(key=lambda o: o.modified, reverse=True)
     q = (q or "").strip().lower()
     out = []
     for o in objs:
-        cached = _summaries.get(o["Key"])
-        if not cached or cached[0] != o["ETag"]:
-            cached = (o["ETag"], _summary(json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())))
-            _summaries[o["Key"]] = cached
+        cached = _summaries.get(o.key)
+        if not cached or cached[0] != o.etag:
+            try:
+                cached = (o.etag, _summary(store.get_json(o.key)[0]))
+            except KeyError:
+                continue
+            _summaries[o.key] = cached
         summary = cached[1]
         if q and not any(q in str(summary.get(k) or "").lower() for k in ("loanId", "correlationId", "aceJobId", "createdBy", "submittedBy")):
             continue
@@ -568,16 +568,14 @@ def needs_attention(summary):
 
 def list_callbacks(limit=500):
     """Every callback delivery the eOCR endpoint received (all jobs, known or not), newest first."""
-    objs = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=INTAKE_BUCKET, Prefix=f"{SIM_PREFIX}callbacks/"):
-        objs += [o for o in page.get("Contents", []) if o["Key"].endswith(".json")]
-    objs.sort(key=lambda o: o["LastModified"], reverse=True)
+    objs = [o for o in store.get().list(f"{SIM_PREFIX}callbacks/") if o.key.endswith(".json")]
+    objs.sort(key=lambda o: o.modified, reverse=True)
     out = []
     for o in objs[:limit]:
-        if o["Key"] not in _callbacks:
-            _callbacks[o["Key"]] = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())
-        rec = _callbacks[o["Key"]]
-        job = o["Key"].split("/")[-2]
+        if o.key not in _callbacks:
+            _callbacks[o.key] = store.get_json(o.key)[0]
+        rec = _callbacks[o.key]
+        job = o.key.split("/")[-2]
         if job not in _job_cid:
             cid = batch_for_job(job)
             if cid:
@@ -587,19 +585,19 @@ def list_callbacks(limit=500):
 
 
 def index_job(job_id, cid):
-    s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{JOB_PREFIX}{job_id}.json", Body=json.dumps({"correlationId": cid}).encode(), ContentType="application/json")
+    store.put_json(f"{JOB_PREFIX}{job_id}.json", {"correlationId": cid})
 
 
 def batch_for_job(job_id):
     try:
-        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{JOB_PREFIX}{job_id}.json")["Body"].read())["correlationId"]
-    except s3.exceptions.NoSuchKey:
+        return store.get_json(f"{JOB_PREFIX}{job_id}.json")[0]["correlationId"]
+    except KeyError:
         return None
 
 
 def callback_records(job_id):
-    keys = sorted(o["Key"] for o in s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=f"{SIM_PREFIX}callbacks/{job_id}/").get("Contents", []))
-    return [json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=k)["Body"].read()) for k in keys]
+    keys = sorted(o.key for o in store.get().list(f"{SIM_PREFIX}callbacks/{job_id}/"))
+    return [store.get_json(k)[0] for k in keys]
 
 
 CONTROL_LOAN_FIELDS = ("loanId", "correlationId", "sellerLoanNumber", "loanAmount", "borrowerLastName")
@@ -678,8 +676,8 @@ ACE_URL_ALLOWED = [u.strip().rstrip("/") for u in os.environ.get("SIM_ACE_URL_AL
 
 def settings():
     try:
-        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=SETTINGS_KEY)["Body"].read())
-    except s3.exceptions.NoSuchKey:
+        return store.get_json(SETTINGS_KEY)[0]
+    except KeyError:
         return {}
 
 
@@ -704,16 +702,17 @@ def save_default_ace_url(url):
         doc.update(aceUrl=check_ace_url(url), aceUrlChangedAt=now_iso())
     else:
         doc.pop("aceUrl", None)
-    s3.put_object(Bucket=INTAKE_BUCKET, Key=SETTINGS_KEY, Body=json.dumps(doc, indent=2).encode(), ContentType="application/json")
+    store.put_json(SETTINGS_KEY, doc)
     return doc
 
 
+STORE_LABEL = f"db:{store.SCHEMA}.object/" if store.MODE == "db" else f"s3://{INTAKE_BUCKET}/"
 RECORD_PREFIX = f"{SIM_PREFIX}records/"   # immutable per-execution records: what was submitted, how it ended
 
 
 def _put_record(cid, name, doc):
     key = f"{RECORD_PREFIX}{cid}/{name}"
-    s3.put_object(Bucket=INTAKE_BUCKET, Key=key, Body=json.dumps(doc, indent=2, default=str).encode(), ContentType="application/json")
+    store.put_json(key, doc)
     return key
 
 
@@ -745,7 +744,7 @@ def store_submission(cid, request, http_status, response):
     def change(b):
         b["submission"] = {"key": key, "at": at, "httpStatus": http_status, "aceJobId": record["aceJobId"], "documents": len(docs),
                            "bytes": sum(d.get("bytes", 0) for d in docs)}
-        add_event(b, "stored", f"submission stored: s3://{INTAKE_BUCKET}/{key}")
+        add_event(b, "stored", f"submission stored: {STORE_LABEL}{key}")
     update_batch(cid, change)
     return record
 
@@ -760,7 +759,7 @@ def store_outcome(cid):
     if source:
         try:
             copy = f"{RECORD_PREFIX}{cid}/{source.rsplit('/', 1)[-1]}"
-            s3.copy_object(Bucket=INTAKE_BUCKET, Key=copy, CopySource={"Bucket": OUTPUT_BUCKET, "Key": source})
+            store.get().put(copy, s3.get_object(Bucket=OUTPUT_BUCKET, Key=source)["Body"].read(), "application/json")
         except Exception as exc:
             log("Response.json copy failed", correlationId=cid, error=f"{type(exc).__name__}: {exc}")
             copy = None
@@ -770,7 +769,7 @@ def store_outcome(cid):
               "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
               "validation": batch.get("validation"), "hitl": batch.get("hitl"),
               "specChecklist": spec_checklist(batch),
-              "responseFileCopy": f"s3://{INTAKE_BUCKET}/{copy}" if copy else None,
+              "responseFileCopy": f"{STORE_LABEL}{copy}" if copy else None,
               "contractErrors": sorted(set(batch.get("contractErrors") or []) | set((batch.get("callback") or {}).get("contractErrors") or [])
                                        | set((batch.get("result") or {}).get("errors") or []))}
     key = _put_record(cid, "outcome.json", record)
@@ -778,22 +777,22 @@ def store_outcome(cid):
     def change(b):
         b["outcomeRecord"] = key
         b["responseCopy"] = copy
-        add_event(b, "stored", f"outcome stored: s3://{INTAKE_BUCKET}/{key}" + (f"; Response.json copied to s3://{INTAKE_BUCKET}/{copy}" if copy else ""))
+        add_event(b, "stored", f"outcome stored: {STORE_LABEL}{key}" + (f"; Response.json copied to {STORE_LABEL}{copy}" if copy else ""))
     update_batch(cid, change)
 
 
 def list_records(cid):
-    objs = s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=f"{RECORD_PREFIX}{cid}/").get("Contents", [])
-    return [{"name": o["Key"].rsplit("/", 1)[-1], "key": f"s3://{INTAKE_BUCKET}/{o['Key']}", "bytes": o["Size"],
-             "storedAt": o["LastModified"].isoformat()} for o in sorted(objs, key=lambda o: o["Key"])]
+    objs = store.get().list(f"{RECORD_PREFIX}{cid}/")
+    return [{"name": o.key.rsplit("/", 1)[-1], "key": f"{STORE_LABEL}{o.key}", "bytes": o.size,
+             "storedAt": o.modified.isoformat()} for o in sorted(objs, key=lambda o: o.key)]
 
 
 def read_record(cid, name):
     if not SAFE_FILE.fullmatch(name):
         raise KeyError(name)
     try:
-        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{RECORD_PREFIX}{cid}/{name}")["Body"].read())
-    except s3.exceptions.NoSuchKey:
+        return store.get_json(f"{RECORD_PREFIX}{cid}/{name}")[0]
+    except KeyError:
         raise KeyError(name) from None
 
 
@@ -945,11 +944,11 @@ class CallbackHandler(BaseHTTPRequestHandler):
         base = f"{SIM_PREFIX}callbacks/{job_id}/"
         refuse = 0
         try:
-            refuse = int(json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{job_id}")["Body"].read())["refuse"])
-        except s3.exceptions.NoSuchKey:
+            refuse = int(store.get_json(f"{SIM_PREFIX}flaky/{job_id}")[0]["refuse"])
+        except KeyError:
             pass
         for _ in range(20):  # attempt numbers are claimed with a create-only write, so concurrent deliveries never share one
-            attempts = len(s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=base).get("Contents", [])) + 1
+            attempts = len(store.get().list(base)) + 1
             answered = 503 if attempts <= refuse else 200
             record = {
                 "receivedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -962,8 +961,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 "payload": payload,
             }
             try:
-                s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{base}{attempts:03d}.json", Body=json.dumps(record, indent=2).encode(),
-                              ContentType="application/json", IfNoneMatch="*")
+                store.put_json(f"{base}{attempts:03d}.json", record, if_none_match=True)
                 break
             except Exception as exc:
                 if not _precondition_failed(exc):
@@ -988,7 +986,8 @@ def serve():
         sys.modules.setdefault("eocr_sim", sys.modules[__name__])  # console shares this module, not a second copy
         import console  # the operator console: same process, its own port, never behind the Lattice target group
         console.start(CONSOLE_HOST, CONSOLE_PORT)
-    log("eOCR simulator callback receiver listening", port=PORT, bucket=INTAKE_BUCKET)
+    store.get()  # connect (and create the simulator's tables) before accepting callbacks
+    log("eOCR simulator callback receiver listening", port=PORT, bucket=INTAKE_BUCKET, store=store.MODE)
     ThreadingHTTPServer(("0.0.0.0", PORT), CallbackHandler).serve_forever()
 
 
@@ -1167,7 +1166,7 @@ class Scenario:
         self.result["aceJobId"] = self.job
         self.ok(f"onboarding -> HTTP 202 aceJobId={self.job}")
         if self.flaky:
-            s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{self.job}", Body=json.dumps({"refuse": self.flaky}).encode())
+            store.put_json(f"{SIM_PREFIX}flaky/{self.job}", {"refuse": self.flaky})
             self.ok(f"eOCR callback endpoint will refuse the first {self.flaky} deliveries with 503")
         index_job(self.job, self.correlation_id)
 
@@ -1229,8 +1228,8 @@ class Scenario:
         deadline = time.time() + timeout_s
         prefix = f"{SIM_PREFIX}callbacks/{self.job}/"
         while time.time() < deadline:
-            objs = sorted(o["Key"] for o in s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=prefix).get("Contents", []))
-            records = [json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=k)["Body"].read()) for k in objs]
+            objs = sorted(o.key for o in store.get().list(prefix))
+            records = [store.get_json(k)[0] for k in objs]
             if any(r["answeredWith"] == 200 for r in records):
                 return records
             time.sleep(10)
@@ -1396,7 +1395,7 @@ def run(args):
         results += list(pool.map(lambda s: s.run(args.timeout), scenarios))
     report = {"finishedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"), "passed": all(r["passed"] for r in results), "results": results}
     key = f"{SIM_PREFIX}reports/{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-    s3.put_object(Bucket=INTAKE_BUCKET, Key=key, Body=json.dumps(report, indent=2, default=str).encode(), ContentType="application/json")
+    store.put_json(key, report)
     for r in results:
         log("RESULT", scenario=r["scenario"], passed=r["passed"], aceJobId=r.get("aceJobId"), minutes=r.get("minutes"), errors=r["errors"])
     print("REPORT " + json.dumps(report, default=str), flush=True)
