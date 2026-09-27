@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eOCR Simulator Console</title>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #1c2330; --muted: #5d6778; --line: #dde1e8; --soft: #eef1f5;
+  --accent: #2456c9; --accent-ink: #ffffff; --ok: #16794a; --ok-bg: #e3f4ea; --warn: #9a5b00; --warn-bg: #fdf1dc;
+  --bad: #b3261e; --bad-bg: #fbe5e3; --info: #2456c9; --info-bg: #e5ecfb; --idle: #5d6778; --idle-bg: #eceef2;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1a1e26; --ink: #e5e8ee; --muted: #9aa3b2; --line: #2c323d; --soft: #222833;
+    --accent: #6f9bff; --accent-ink: #0d1220; --ok: #5fd39a; --ok-bg: #173325; --warn: #f0b75a; --warn-bg: #3a2c12;
+    --bad: #ff8a80; --bad-bg: #3d1c1a; --info: #8fb0ff; --info-bg: #1d2a47; --idle: #9aa3b2; --idle-bg: #262b35;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+#view-rep { display: block; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 17px; margin: 0; }
+header .env { color: var(--muted); font-size: 12px; font-family: var(--mono); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+nav { margin-left: auto; display: flex; gap: 4px; }
+nav button { background: none; border: 1px solid transparent; color: var(--muted); }
+nav button.on { border-color: var(--line); color: var(--ink); background: var(--soft); }
+main { display: grid; grid-template-columns: 340px 1fr; min-height: calc(100vh - 58px); }
+aside { border-right: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-width: 0; }
+aside .tools { padding: 12px; display: flex; gap: 8px; border-bottom: 1px solid var(--line); }
+aside .tools select { flex: 1; }
+#list { overflow-y: auto; flex: 1; }
+.item { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.item:hover { background: var(--soft); }
+.item.sel { background: var(--info-bg); }
+.item .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.item .cid { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
+section#detail { padding: 18px 22px 40px; min-width: 0; }
+.empty { color: var(--muted); padding: 40px; text-align: center; }
+button, .btn { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); min-width: 0; }
+textarea { font-family: var(--mono); font-size: 12.5px; width: 100%; min-height: 220px; }
+label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+label.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+.s-ok { color: var(--ok); background: var(--ok-bg); } .s-bad { color: var(--bad); background: var(--bad-bg); }
+.s-warn { color: var(--warn); background: var(--warn-bg); } .s-info { color: var(--info); background: var(--info-bg); }
+.s-idle { color: var(--idle); background: var(--idle-bg); }
+.head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 6px; }
+.head h2 { margin: 0; font-size: 18px; font-family: var(--mono); word-break: break-all; }
+.head .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 20px; color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+.meta b { color: var(--ink); font-weight: 500; font-family: var(--mono); }
+.steps { display: flex; margin: 8px 0 18px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.steps div { flex: 1; padding: 8px 6px; text-align: center; font-size: 12px; color: var(--muted); border-right: 1px solid var(--line); }
+.steps div:last-child { border-right: 0; }
+.steps .done { color: var(--ok); background: var(--ok-bg); }
+.steps .now { color: var(--info); background: var(--info-bg); font-weight: 700; }
+.steps .fail { color: var(--bad); background: var(--bad-bg); font-weight: 700; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h3 { margin: 0 0 10px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.card h3 .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--soft); font-size: 11px; color: var(--muted); }
+.card .hint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+.card.wide { grid-column: 1 / -1; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }
+.row > label { flex: 1 1 140px; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 5px 6px; }
+td { border-bottom: 1px solid var(--line); padding: 5px 6px; vertical-align: top; word-break: break-word; }
+td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+.scroll { max-height: 320px; overflow: auto; }
+pre { background: var(--soft); padding: 10px; border-radius: 6px; font-size: 12px; overflow: auto; max-height: 360px; margin: 6px 0 0; }
+.drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 14px; text-align: center; color: var(--muted); margin: 10px 0; }
+.drop.over { border-color: var(--accent); color: var(--accent); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
+.ev { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 150px 120px 1fr; gap: 10px; font-size: 12.5px; }
+.ev .t { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.ev details summary { cursor: pointer; }
+.errs li { color: var(--bad); margin-bottom: 4px; }
+.okline { color: var(--ok); }
+#toast { position: fixed; bottom: 16px; right: 16px; max-width: 480px; padding: 10px 14px; border-radius: 8px; background: var(--ink); color: var(--bg); display: none; z-index: 20; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); width: min(640px, calc(100vw - 32px)); padding: 18px 20px; }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog h3 { margin: 0 0 12px; }
+.report { margin-bottom: 14px; }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
+  .grid { grid-template-columns: 1fr; }
+  .ev { grid-template-columns: 1fr; gap: 2px; }
+  .steps { flex-wrap: wrap; } .steps div { flex: 1 0 33%; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>eOCR Simulator Console</h1>
+  <div class="env" id="env"></div>
+  <nav><button id="tab-exec" class="on">Executions</button><button id="tab-rep">Scenario reports</button></nav>
+</header>
+<main id="view-exec">
+  <aside>
+    <div class="tools">
+      <button class="primary" id="new">+ New execution</button>
+      <select id="filter" aria-label="Filter by state">
+        <option value="">All states</option><option value="open">Open</option><option>DRAFT</option><option>STAGED</option>
+        <option>SUBMITTED</option><option>IN_PROGRESS</option><option>CLOSED</option><option>REJECTED</option>
+      </select>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <section id="detail"><div class="empty">Create an execution or pick one from the list.<br>Each execution is one eOCR run: <code>loanId=&lt;id&gt;/correlationId=&lt;execution&gt;/</code> in the intake bucket.</div></section>
+</main>
+<main id="view-rep" hidden><section id="reports" style="padding:18px 22px"></section></main>
+
+<dialog id="dlg-new">
+  <h3>New eOCR execution</h3>
+  <div class="row">
+    <label>Loan ID *<input id="n-loan" required></label>
+    <label>correlationId (eOCR execution)<input id="n-cid" placeholder="generated if empty"></label>
+  </div>
+  <div class="row">
+    <label>Seller loan number<input id="n-seller"></label>
+    <label>Loan amount<input id="n-amount"></label>
+    <label>Borrower last name<input id="n-borrower"></label>
+  </div>
+  <div class="row">
+    <label>Control file name<input id="n-control" value="controlfile.json"></label>
+    <label class="inline"><input type="checkbox" id="n-extract" checked> extractionRequired</label>
+  </div>
+  <div class="row" style="justify-content: space-between">
+    <button id="n-fill" type="button">Fill from test loan</button>
+    <span><button id="n-cancel" type="button">Cancel</button> <button class="primary" id="n-create" type="button">Create</button></span>
+  </div>
+</dialog>
+
+<dialog id="dlg-close">
+  <h3>Close execution</h3>
+  <p class="hint" style="color:var(--muted)">eOCR closes an execution itself when ACE's callback arrives. Close by hand only when the callback never came:
+    the console asks the Status API first, and if the job is terminal it retrieves the result (reconciliation); otherwise it records the execution as abandoned.</p>
+  <label>Note<input id="c-note" placeholder="why it is being closed"></label>
+  <div class="row" style="justify-content:flex-end; margin-top: 12px"><button id="c-cancel">Cancel</button><button class="primary" id="c-ok">Close execution</button></div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const fmt = n => (n ?? 0).toLocaleString();
+const J = v => esc(JSON.stringify(v, null, 2));
+let current = null, selected = null, controlDirty = false, rawMode = false, cfg = {};
+
+async function api(method, path, body, raw) {
+  const opt = {method, headers: {}};
+  if (raw) { opt.body = raw; opt.headers["Content-Type"] = raw.type || "application/octet-stream"; }
+  else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({error: `HTTP ${r.status}`}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+function toast(msg, bad) {
+  const t = $("#toast"); t.textContent = msg; t.style.background = bad ? "var(--bad)" : "var(--ink)"; t.style.display = "block";
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = "none", bad ? 7000 : 3000);
+}
+async function act(btn, fn, okMsg) {
+  if (btn) btn.disabled = true;
+  try { const r = await fn(); if (okMsg) toast(okMsg); return r; }
+  catch (e) { toast(e.message, true); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+const STATE_CLASS = {DRAFT: "s-idle", STAGED: "s-info", SUBMITTED: "s-info", IN_PROGRESS: "s-warn", CALLBACK_RECEIVED: "s-warn", CLOSED: "s-ok", REJECTED: "s-bad"};
+const CODE_CLASS = c => c === 0 ? "s-ok" : [1000, 2000, 3000, 4040].includes(c) ? "s-bad" : c === 4000 || c === 202 ? "s-warn" : "s-idle";
+const chip = (text, cls) => `<span class="chip ${cls}">${esc(text)}</span>`;
+const stateChip = b => {
+  if (b.state === "CLOSED" && b.outcome) return chip(`CLOSED · ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad");
+  return chip(b.state, STATE_CLASS[b.state] || "s-idle");
+};
+const ago = iso => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso)) / 1000;
+  return s < 60 ? `${Math.max(0, s | 0)}s ago` : s < 3600 ? `${s / 60 | 0}m ago` : s < 86400 ? `${s / 3600 | 0}h ago` : iso.slice(0, 10); };
+
+// ---------------------------------------------------------------- list
+async function loadList() {
+  let items;
+  try { items = await api("GET", "/api/batches"); } catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const f = $("#filter").value;
+  items = items.filter(b => !f || (f === "open" ? !["CLOSED", "REJECTED"].includes(b.state) : b.state === f));
+  $("#list").innerHTML = items.length ? items.map(b => `
+    <div class="item ${b.correlationId === selected ? "sel" : ""}" data-cid="${esc(b.correlationId)}">
+      <div class="top"><span class="cid">${esc(b.correlationId)}</span>${stateChip(b)}</div>
+      <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}
+        ${b.workflow && b.workflow.stage && b.state !== "CLOSED" ? `<span>${esc(b.workflow.stage)}/${esc(b.workflow.state)}</span>` : ""}
+        <span>${esc(b.source)}</span><span>${ago(b.updatedAt)}</span></div>
+    </div>`).join("") : `<div class="empty">No executions yet.</div>`;
+}
+$("#list").addEventListener("click", e => { const it = e.target.closest(".item"); if (it) select(it.dataset.cid); });
+$("#filter").addEventListener("change", loadList);
+
+async function select(cid) {
+  if (cid !== selected) { controlDirty = false; rawMode = false; }
+  selected = cid; history.replaceState(null, "", "#" + encodeURIComponent(cid));
+  document.querySelectorAll(".item").forEach(i => i.classList.toggle("sel", i.dataset.cid === cid));
+  await loadDetail(true);
+}
+
+// ---------------------------------------------------------------- detail
+async function loadDetail(force) {
+  if (!selected) return;
+  let b;
+  try { b = await api("GET", "/api/batches/" + encodeURIComponent(selected)); }
+  catch (e) { $("#detail").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const changed = !current || current.correlationId !== b.correlationId || current.updatedAt !== b.updatedAt || (current.callbacks || []).length !== b.callbacks.length;
+  current = b;
+  if (force || changed) render(b);
+}
+
+function steps(b) {
+  const names = ["Created", "Documents", "Control file", "Onboarded", "Processing", "Callback", "Closed"];
+  const reached = {DRAFT: b.documents.length ? 1 : 0, STAGED: 2, REJECTED: 3, SUBMITTED: 3, IN_PROGRESS: 4, CALLBACK_RECEIVED: 5, CLOSED: 6}[b.state] ?? 0;
+  return `<div class="steps">${names.map((n, i) => {
+    let cls = i < reached ? "done" : i === reached ? "now" : "";
+    if (b.state === "REJECTED" && i === 3) cls = "fail";
+    if (b.state === "CLOSED" && i === 6) cls = b.outcome && b.outcome.code === 0 ? "done" : "fail";
+    if (b.state === "CLOSED" && i === 5 && !b.callback) cls = "fail";
+    return `<div class="${cls}">${n}</div>`; }).join("")}</div>`;
+}
+
+function render(b) {
+  const editable = ["DRAFT", "STAGED", "REJECTED"].includes(b.state);
+  const keepControl = controlDirty && $("#control-card");
+  const savedControl = keepControl ? $("#control-card") : null;  // keep the operator's unsaved edits
+  const st = (b.status || {}).status || {}, wf = (b.status || {}).workflow || {};
+  $("#detail").innerHTML = `
+    <div class="head"><h2>${esc(b.correlationId)}</h2>${stateChip(b)}
+      <div class="actions">
+        <button id="a-refresh" ${b.aceJobId ? "" : "disabled"}>Check status now</button>
+        <button id="a-resubmit" ${b.documents.length ? "" : "disabled"}>Resubmit as new execution</button>
+        <button class="danger" id="a-close" ${b.state === "CLOSED" ? "disabled" : ""}>Close…</button>
+      </div></div>
+    <div class="meta"><span>loanId <b>${esc(b.loanId)}</b></span><span>aceJobId <b>${esc(b.aceJobId || "—")}</b></span>
+      <span>source <b>${esc(b.source)}</b></span><span>created <b>${esc(b.createdAt)}</b></span>
+      ${b.resubmissionOf ? `<span>resubmission of <b>${esc(b.resubmissionOf)}</b></span>` : ""}
+      <span>intake <b>${esc(b.s3.intake)}</b></span></div>
+    ${steps(b)}
+    <div class="grid">
+      ${docsCard(b, editable)}
+      <div class="card" id="control-card"></div>
+      ${submitCard(b)}
+      ${trackCard(b, st, wf)}
+      ${callbackCard(b)}
+      ${resultCard(b)}
+      ${checksCard(b)}
+      ${timelineCard(b)}
+    </div>`;
+  if (savedControl) $("#control-card").replaceWith(savedControl); else renderControl(b, editable);
+  wire(b);
+}
+
+function docsCard(b, editable) {
+  return `<div class="card"><h3><span class="n">1</span>Documents</h3>
+    <p class="hint">Uploaded straight into <span class="mono">${esc(b.s3.intake)}</span>, the way eOCR stages a package.</p>
+    ${b.documents.length ? `<div class="scroll"><table><tr><th>fileName</th><th>contentType</th><th>bytes</th><th>origin</th><th></th></tr>
+      ${b.documents.map(d => `<tr><td class="mono">${esc(d.fileName)}</td><td>${esc(d.contentType)}</td><td>${fmt(d.bytes)}</td><td>${esc(d.origin || "")}</td>
+        <td>${editable ? `<button class="danger" data-rm="${esc(d.fileName)}" title="Remove">✕</button>` : ""}</td></tr>`).join("")}</table></div>`
+      : `<p class="hint">No documents yet.</p>`}
+    ${editable ? `<div class="drop" id="drop">Drop files here or <label style="display:inline;color:var(--accent);cursor:pointer">browse<input type="file" id="files" multiple hidden></label></div>
+      <div class="row"><label style="flex:0 0 110px">Test pages<input type="number" id="t-pages" value="40" min="1"></label>
+        <button data-test="package">+ Test package (NOTE pages)</button><button data-test="locked">+ Password-protected PDF</button><button data-test="corrupt">+ Corrupt PDF</button></div>`
+      : `<p class="hint">The package is fixed once submitted.</p>`}
+  </div>`;
+}
+
+function renderControl(b, editable) {
+  const li = b.loanInfo || {};
+  const extra = Object.keys(li).filter(k => !["sellerLoanNumber", "loanAmount", "borrowerLastName"].includes(k));
+  $("#control-card").innerHTML = `<h3><span class="n">2</span>Control file <span class="mono" style="font-weight:400;color:var(--muted)">${esc(b.controlFileName)}</span>
+      ${b.controlOverride ? chip("hand-edited", "s-warn") : ""}</h3>
+    <p class="hint">Spec 3.2. The documents list follows the uploaded files. Written to S3 only when you press “Write control file”.</p>
+    <div id="cf-form" ${rawMode ? "hidden" : ""}>
+      <div class="row"><label>Seller loan number<input data-li="sellerLoanNumber" value="${esc(li.sellerLoanNumber)}" ${editable ? "" : "disabled"}></label>
+        <label>Loan amount<input data-li="loanAmount" value="${esc(li.loanAmount)}" ${editable ? "" : "disabled"}></label>
+        <label>Borrower last name<input data-li="borrowerLastName" value="${esc(li.borrowerLastName)}" ${editable ? "" : "disabled"}></label></div>
+      ${extra.length ? `<p class="hint">Other loanInfo fields: ${extra.map(k => `<span class="mono">${esc(k)}=${esc(li[k])}</span>`).join(", ")}</p>` : ""}
+      <label class="inline"><input type="checkbox" id="cf-extract" ${b.extractionRequired ? "checked" : ""} ${editable ? "" : "disabled"}> extractionRequired</label>
+    </div>
+    <div id="cf-raw" ${rawMode ? "" : "hidden"}><textarea id="cf-json" ${editable ? "" : "disabled"}>${J(b.controlOverride || b.controlPreview)}</textarea>
+      <p class="hint">Hand-edited JSON is written as is (use it for negative tests, e.g. a loanId that differs from the request).</p></div>
+    ${rawMode ? "" : `<pre>${J(b.controlPreview)}</pre>`}
+    <div class="row" style="margin-top:10px">
+      ${editable ? `<button id="cf-toggle">${rawMode ? "Back to form" : "Edit raw JSON"}</button>
+        ${b.controlOverride ? `<button id="cf-reset">Discard hand edits</button>` : ""}
+        <button id="cf-save">Save</button><button class="primary" id="cf-stage">Write control file to S3</button>` : ""}
+    </div>`;
+}
+
+function submitCard(b) {
+  const ev = (b.events || []).filter(e => ["submitted", "rejected"].includes(e.type)).pop();
+  const canSubmit = ["STAGED", "REJECTED"].includes(b.state);
+  return `<div class="card"><h3><span class="n">3</span>Onboarding <span class="mono" style="font-weight:400;color:var(--muted)">POST /integration/loan/onboarding</span></h3>
+    <p class="hint">Spec 4. ACE answers 202 with an aceJobId and processes asynchronously.</p>
+    ${canSubmit ? `<div class="row">
+        <label>batchPath<select id="s-mode"><option value="file">control file (…/${esc(b.controlFileName)})</option><option value="folder">folder (…/correlationId=…/)</option></select></label>
+        <label title="The callback endpoint answers 503 to the first N deliveries: proves ACE retries.">Refuse first N callbacks (simulated outage)<input type="number" id="s-flaky" min="0" max="10" value="0"></label></div>
+      <button class="primary" id="s-submit">Submit to ACE</button>`
+      : b.state === "DRAFT" ? `<p class="hint">Write the control file first.</p>` : ""}
+    ${ev ? `<dl class="kv" style="margin-top:10px"><dt>result</dt><dd>${esc(ev.message)}</dd><dt>batchPath</dt><dd class="mono">${esc(b.batchPath)}</dd>
+      ${b.flaky ? `<dt>outage</dt><dd>first ${b.flaky} callbacks refused</dd>` : ""}</dl>
+      <details><summary>request / response</summary><pre>${J(ev.data)}</pre></details>` : ""}
+  </div>`;
+}
+
+function trackCard(b, st, wf) {
+  const hitl = wf.state === "HITL_PENDING" && b.state !== "CLOSED";
+  return `<div class="card"><h3><span class="n">4</span>Tracking <span class="mono" style="font-weight:400;color:var(--muted)">GET /integration/loan/status/{aceJobId}</span></h3>
+    <p class="hint">Spec 7. Open executions are polled every ${esc(cfg.trackIntervalSeconds)}s.</p>
+    ${b.status ? `<dl class="kv"><dt>workflow</dt><dd><b>${esc(wf.stage || "—")}</b> / ${esc(wf.state || "—")}</dd>
+        <dt>status</dt><dd>${chip(`${st.code} ${st.value}`, CODE_CLASS(st.code))} ${esc(st.description)}</dd>
+        <dt>batchPath</dt><dd class="mono">${esc(b.status.batchPath || "—")}</dd>
+        <dt>as of</dt><dd>${esc(b.status.timestamp)}</dd></dl>` : `<p class="hint">No status yet.</p>`}
+    ${b.stages.length ? `<div class="scroll" style="margin-top:10px"><table><tr><th>seen at</th><th>stage / state</th><th>status</th></tr>
+      ${b.stages.map(s => `<tr><td class="mono">${esc(s.at.slice(11))}</td><td>${esc(s.key[0] || "—")} / ${esc(s.key[1] || "—")}</td>
+        <td>${chip(`${s.key[2]} ${s.value}`, CODE_CLASS(s.key[2]))}</td></tr>`).join("")}</table></div>` : ""}
+    ${b.callbackOverdue && !b.callback ? `<p class="errs">No callback yet although the Status API is terminal — use Close… to reconcile.</p>` : ""}
+    ${hitl ? `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)"><b>HITL review pending.</b>
+      <p class="hint">Act as the ACE reviewer (not an eOCR step) so the job can finish.</p>
+      <button id="h-load">Load review</button><div id="hitl"></div></div>` : ""}
+  </div>`;
+}
+
+function callbackCard(b) {
+  const cbs = b.callbacks || [];
+  return `<div class="card"><h3><span class="n">5</span>Callbacks received <span class="mono" style="font-weight:400;color:var(--muted)">POST /eocr/callback</span></h3>
+    <p class="hint">Spec 5/6. Every delivery attempt ACE makes, as the eOCR endpoint answered it.</p>
+    ${cbs.length ? `<div class="scroll"><table><tr><th>#</th><th>received</th><th>answered</th><th>status</th><th>caller</th><th>contract</th></tr>
+      ${cbs.map(c => { const s = (c.payload || {}).status || {}; return `<tr><td>${c.attempt}</td><td class="mono">${esc(c.receivedAt)}</td>
+        <td>${chip(c.answeredWith, c.answeredWith === 200 ? "s-ok" : "s-warn")}</td><td>${chip(`${s.code} ${s.value}`, CODE_CLASS(s.code))}</td>
+        <td class="mono" title="${esc(c.callerPrincipal)}">${esc((c.callerPrincipal || "unsigned").split("/").slice(-2, -1)[0] || c.callerPrincipal || "unsigned")}</td>
+        <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} errors`, "s-bad") : chip("ok", "s-ok")}</td></tr>`; }).join("")}</table></div>
+      <p class="hint" style="margin-top:8px">Idempotency-Key: <span class="mono">${esc([...new Set(cbs.map(c => c.idempotencyKey))].join(", ") || "—")}</span></p>
+      <details><summary>last payload</summary><pre>${J(cbs[cbs.length - 1].payload)}</pre></details>`
+      : `<p class="hint">${b.aceJobId ? "Waiting for ACE to call back." : "Nothing yet."}</p>`}
+  </div>`;
+}
+
+function resultCard(b) {
+  const o = b.outcome, r = b.result;
+  if (!o) return `<div class="card"><h3><span class="n">6</span>Result</h3><p class="hint">Filled in when the execution closes: outcome, failed documents and the retrieved *Response.json.</p></div>`;
+  const s = (r || {}).summary;
+  return `<div class="card wide"><h3><span class="n">6</span>Result ${chip(`${o.code ?? "—"} ${o.value}`, o.code === 0 ? "s-ok" : "s-bad")}</h3>
+    <dl class="kv"><dt>description</dt><dd>${esc(o.description)}</dd><dt>closed</dt><dd>${esc(b.closedAt)} by ${esc(b.closedBy)}</dd>
+      <dt>batchPath</dt><dd class="mono">${esc(o.batchPath || "—")}</dd>
+      ${(o.failedDocuments || []).length ? `<dt>failedDocuments</dt><dd>${o.failedDocuments.map(f => `<div><span class="mono">${esc(f.documentName)}</span> — ${esc(f.reason)}</div>`).join("")}</dd>` : ""}
+      ${r && r.key ? `<dt>Response.json</dt><dd class="mono">${esc(r.key)} ${r.ok ? chip("matches spec 6.4/6.5", "s-ok") : chip("contract errors", "s-bad")}</dd>` : ""}
+    </dl>
+    ${r && r.errors.length ? `<ul class="errs">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
+    ${s ? `<p class="hint" style="margin-top:10px">validationStatus <b>${esc(s.validationStatus)}</b> · ${s.documentTypes} document types · ${s.documents} documents · ${s.extractedFields} extracted fields</p>
+      <div class="scroll"><table><tr><th>document type</th><th>file</th><th>pages</th><th>docType</th><th>extracted fields</th></tr>
+      ${s.rows.map(x => `<tr><td>${esc(x.documentType)}</td><td class="mono">${esc(x.fileName)}</td><td class="mono">${esc(x.pageRange)}</td>
+        <td>${esc(x.docTypeName || x.docTypeId)}${x.duplicatePagesOf ? ` <span class="chip s-warn">dup of ${esc(x.duplicatePagesOf)}</span>` : ""}</td>
+        <td>${Object.entries(x.fields || {}).map(([k, v]) => `<div><span class="mono">${esc(k)}</span>: ${esc(v)}</div>`).join("") || "—"}</td></tr>`).join("")}</table></div>
+      <p><button id="r-raw">View raw Response.json</button></p><pre id="r-json" hidden></pre>` : ""}
+  </div>`;
+}
+
+function checksCard(b) {
+  const cbErrs = (b.callback || {}).contractErrors || [], resErrs = (b.result || {}).errors || [];
+  const all = [...new Set([...(b.contractErrors || []), ...cbErrs, ...resErrs])];
+  const done = b.state === "CLOSED";
+  return `<div class="card"><h3>Contract checks ${all.length ? chip(`${all.length} failing`, "s-bad") : done ? chip("all passed", "s-ok") : chip("so far ok", "s-idle")}</h3>
+    <p class="hint">Onboarding ack (4.2), Status API (7.3/7.5), callback (5.1/6.x), callback vs Status API, Response.json (6.4/6.5).</p>
+    ${all.length ? `<ul class="errs">${all.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : `<p class="okline">No contract deviations seen${done ? "" : " yet"}.</p>`}
+  </div>`;
+}
+
+function timelineCard(b) {
+  const evs = [...(b.events || [])].reverse();
+  const cls = t => ({"contract-error": "s-bad", rejected: "s-bad", error: "s-bad", warning: "s-warn", "callback-refused": "s-warn", closed: "s-ok", callback: "s-ok", result: "s-info"}[t] || "s-idle");
+  return `<div class="card wide"><h3>Timeline <span style="font-weight:400;color:var(--muted)">(${evs.length} events, newest first)</span></h3>
+    <div class="scroll" style="max-height:420px">${evs.map(e => `<div class="ev"><span class="t">${esc(e.at)}</span><span>${chip(e.type, cls(e.type))}</span>
+      <div>${esc(e.message)}${e.data ? `<details><summary class="hint" style="margin:0">details</summary><pre>${J(e.data)}</pre></details>` : ""}</div></div>`).join("")}</div>
+  </div>`;
+}
+
+function wire(b) {
+  const cid = encodeURIComponent(b.correlationId), base = "/api/batches/" + cid;
+  const after = async r => { if (r) { controlDirty = false; await loadDetail(true); loadList(); } };
+  $("#a-refresh").onclick = e => act(e.target, () => api("POST", base + "/refresh"), "Status refreshed").then(after);
+  $("#a-resubmit").onclick = e => act(e.target, () => api("POST", base + "/resubmit"), "New execution created").then(r => r && (loadList(), select(r.correlationId)));
+  $("#a-close").onclick = () => { $("#c-note").value = ""; $("#dlg-close").showModal(); };
+  document.querySelectorAll("[data-rm]").forEach(btn => btn.onclick = e => act(e.target, () => api("DELETE", `${base}/files/${encodeURIComponent(btn.dataset.rm)}`), "Removed").then(after));
+  document.querySelectorAll("[data-test]").forEach(btn => btn.onclick = e =>
+    act(e.target, () => api("POST", base + "/testdata", {kind: btn.dataset.test, pages: +$("#t-pages").value}), "Test document staged").then(after));
+  const files = $("#files"), drop = $("#drop");
+  const upload = async list => { for (const f of list) { toast(`Uploading ${f.name}…`);
+      const r = await act(null, () => api("PUT", `${base}/files/${encodeURIComponent(f.name)}?contentType=${encodeURIComponent(f.type || "")}`, undefined, f), `Uploaded ${f.name}`);
+      if (!r) break; } await after(true); };
+  if (files) files.onchange = () => upload([...files.files]);
+  if (drop) {
+    drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+    drop.ondragleave = () => drop.classList.remove("over");
+    drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files]); };
+  }
+  const card = $("#control-card");
+  card.oninput = () => controlDirty = true;
+  const controlBody = () => {
+    if (rawMode) { let parsed; try { parsed = JSON.parse($("#cf-json").value); } catch (err) { throw new Error("Control file JSON: " + err.message); } return {controlOverride: parsed}; }
+    const li = {...(current.loanInfo || {})}; card.querySelectorAll("[data-li]").forEach(i => li[i.dataset.li] = i.value.trim());
+    return {loanInfo: li, extractionRequired: $("#cf-extract").checked};
+  };
+  if ($("#cf-toggle")) $("#cf-toggle").onclick = () => { rawMode = !rawMode; controlDirty = false; renderControl(current, true); wire(current); };
+  if ($("#cf-reset")) $("#cf-reset").onclick = e => act(e.target, () => api("PUT", base + "/control", {controlOverride: null}), "Hand edits discarded").then(r => { rawMode = false; after(r); });
+  if ($("#cf-save")) $("#cf-save").onclick = e => act(e.target, () => api("PUT", base + "/control", controlBody()), "Saved").then(after);
+  if ($("#cf-stage")) $("#cf-stage").onclick = e => act(e.target, async () => { await api("PUT", base + "/control", controlBody()); return api("POST", base + "/stage"); },
+    "Control file written to S3").then(after);
+  if ($("#s-submit")) $("#s-submit").onclick = e => act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value}))
+    .then(r => { if (r) toast(r.state === "REJECTED" ? "ACE rejected the onboarding request — see timeline" : `Accepted: ${r.aceJobId}`, r.state === "REJECTED"); after(r); });
+  if ($("#r-raw")) $("#r-raw").onclick = e => act(e.target, () => api("GET", base + "/response")).then(r => { if (r) { const p = $("#r-json"); p.textContent = JSON.stringify(r, null, 2); p.hidden = !p.hidden; } });
+  if ($("#h-load")) $("#h-load").onclick = e => act(e.target, () => api("GET", base + "/hitl")).then(r => {
+    if (!r) return; const fields = ((r.review || {}).fieldDetails) || [];
+    $("#hitl").innerHTML = `<p class="hint">HTTP ${r.httpStatus} · totalMatches ${esc((r.review || {}).totalMatches)}</p>
+      <table><tr><th>field</th><th>control file</th><th>extracted</th><th>matched?</th></tr>${fields.map((f, i) => `<tr><td class="mono">${esc(f.fieldName)}</td>
+        <td>${esc(f.metadataValue)}</td><td>${esc(f.extractedValue)}</td><td><input type="checkbox" data-hf="${i}" ${f.isMatched !== false ? "checked" : ""}></td></tr>`).join("")}</table>
+      <p><button class="primary" id="h-send">Send reviewer decision</button></p>`;
+    $("#h-send").onclick = ev => act(ev.target, () => api("POST", base + "/hitl", {fields: fields.map((f, i) => ({fieldName: f.fieldName, metadataValue: f.metadataValue,
+      extractedValue: f.extractedValue, isMatched: $(`[data-hf="${i}"]`).checked}))}), "Decision sent").then(after);
+  });
+}
+
+$("#c-cancel").onclick = () => $("#dlg-close").close();
+$("#c-ok").onclick = e => act(e.target, () => api("POST", `/api/batches/${encodeURIComponent(selected)}/close`, {note: $("#c-note").value}), "Execution closed")
+  .then(r => { $("#dlg-close").close(); if (r) { loadDetail(true); loadList(); } });
+
+// ---------------------------------------------------------------- new execution
+$("#new").onclick = () => { ["n-loan", "n-cid", "n-seller", "n-amount", "n-borrower"].forEach(id => $("#" + id).value = ""); $("#dlg-new").showModal(); };
+$("#n-cancel").onclick = () => $("#dlg-new").close();
+$("#n-fill").onclick = e => act(e.target, () => api("GET", "/api/testloan")).then(t => {
+  if (!t) return; if (t.error) return toast("No test loan: " + t.error, true);
+  $("#n-loan").value = t.loanId; const li = t.loanInfo || {};
+  $("#n-seller").value = li.sellerLoanNumber || ""; $("#n-amount").value = li.loanAmount || ""; $("#n-borrower").value = li.borrowerLastName || "";
+  $("#n-fill").dataset.extra = JSON.stringify(li);
+});
+$("#n-create").onclick = e => {
+  const li = JSON.parse($("#n-fill").dataset.extra || "{}");
+  Object.assign(li, {sellerLoanNumber: $("#n-seller").value.trim(), loanAmount: $("#n-amount").value.trim(), borrowerLastName: $("#n-borrower").value.trim()});
+  act(e.target, () => api("POST", "/api/batches", {loanId: $("#n-loan").value.trim(), correlationId: $("#n-cid").value.trim(), loanInfo: li,
+    extractionRequired: $("#n-extract").checked, controlFileName: $("#n-control").value.trim()}), "Execution created")
+    .then(r => { if (r) { $("#dlg-new").close(); delete $("#n-fill").dataset.extra; loadList(); select(r.correlationId); } });
+};
+
+// ---------------------------------------------------------------- reports
+async function loadReports() {
+  let reps; try { reps = await api("GET", "/api/reports"); } catch (e) { $("#reports").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  $("#reports").innerHTML = `<p class="hint" style="color:var(--muted)">Reports written by scripted runs (<span class="mono">eocr_sim.py run</span>). Their executions also appear under Executions.</p>` +
+    (reps.length ? reps.map(r => `<div class="card report"><h3>${esc(r.finishedAt)} ${chip(r.passed ? "PASSED" : "FAILED", r.passed ? "s-ok" : "s-bad")}
+      <span class="mono" style="font-weight:400;color:var(--muted)">${esc(r.key)}</span></h3>
+      <table><tr><th>scenario</th><th>result</th><th>execution</th><th>minutes</th><th>errors</th></tr>
+      ${r.results.map(x => `<tr><td>${esc(x.scenario)}</td><td>${chip(x.passed ? "passed" : "failed", x.passed ? "s-ok" : "s-bad")}</td>
+        <td class="mono">${x.correlationId ? `<a href="#${esc(x.correlationId)}" data-go="${esc(x.correlationId)}">${esc(x.correlationId)}</a>` : ""} ${esc(x.aceJobId || "")}</td>
+        <td>${esc(x.minutes ?? "")}</td><td>${(x.errors || []).map(e => `<div class="errs">${esc(e)}</div>`).join("")}</td></tr>`).join("")}</table></div>`).join("")
+      : `<div class="empty">No scenario reports yet.</div>`);
+}
+$("#reports").addEventListener("click", e => { const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); select(a.dataset.go); } });
+function showTab(t) {
+  $("#tab-exec").classList.toggle("on", t === "exec"); $("#tab-rep").classList.toggle("on", t === "rep");
+  $("#view-exec").hidden = t !== "exec"; $("#view-rep").hidden = t !== "rep"; if (t === "rep") loadReports();
+}
+$("#tab-exec").onclick = () => showTab("exec"); $("#tab-rep").onclick = () => showTab("rep");
+
+// ---------------------------------------------------------------- boot
+(async () => {
+  try { cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message, true); }
+  $("#env").innerHTML = `<span>ACE ${esc(cfg.integrationUrl || "(not set)")}</span><span>intake s3://${esc(cfg.intakeBucket)}</span><span>output s3://${esc(cfg.outputBucket)}</span>`;
+  await loadList();
+  if (location.hash.length > 1) select(decodeURIComponent(location.hash.slice(1)));
+  setInterval(() => { if (!$("#view-exec").hidden) { loadList(); if (current && current.state !== "CLOSED" || !current) loadDetail(false); } }, 5000);
+})();
+</script>
+</body>
+</html>

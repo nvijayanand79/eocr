@@ -42,6 +42,8 @@ TESTDATA_BUCKET = os.environ.get("ACE_BUCKET_CONFIG", "")
 TESTDATA_PREFIX = os.environ.get("SIM_TESTDATA_PREFIX", "test-data/eocr/")
 SIM_PREFIX = "eocr-sim/"  # simulator bookkeeping inside the intake bucket (eOCR's own area)
 PORT = int(os.environ.get("PORT", "8080"))
+CONSOLE_PORT = int(os.environ.get("SIM_CONSOLE_PORT", "8081"))   # 0 switches the console off
+CONSOLE_HOST = os.environ.get("SIM_CONSOLE_HOST", "127.0.0.1")   # loopback: reached through an SSM port-forward
 
 STATUS = {0: "COMPLETED", 1000: "PRECHECK_FAILED", 2000: "VALIDATION_FAILED", 3000: "PROCESSING_FAILED",
           4000: "IN_PROGRESS", 202: "ACCEPTED", 4040: "JOB_NOT_FOUND"}
@@ -126,8 +128,9 @@ def check_status_response(body, job_id):
     return errs
 
 
-def check_response_file(doc, job_id, extraction_required, file_names, expect_validation):
-    """Spec 6.4 / 6.5."""
+def check_response_file(doc, job_id, extraction_required, file_names, expect_validation, min_types=3):
+    """Spec 6.4 / 6.5. expect_validation: a value, a tuple of allowed values, or None (not checked).
+    min_types: document types that must carry extracted fields when extraction ran (whole-package extraction)."""
     errs = []
     order = ["aceJobId", "extractionRequired", "validationStatus", "Documents", "fileName", "fileSize"]
     if list(doc) != order:
@@ -136,7 +139,8 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
         errs.append("Response.json aceJobId mismatch")
     if doc.get("extractionRequired") != ("true" if extraction_required else "false"):
         errs.append(f"Response.json extractionRequired {doc.get('extractionRequired')!r} != {extraction_required}")
-    if doc.get("validationStatus") != expect_validation:
+    allowed = expect_validation if isinstance(expect_validation, tuple) else (expect_validation,)
+    if expect_validation is not None and doc.get("validationStatus") not in allowed:
         errs.append(f"Response.json validationStatus {doc.get('validationStatus')} != {expect_validation}")
     docs = doc.get("Documents")
     if not isinstance(docs, dict) or not docs:
@@ -169,11 +173,278 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
     if (not extraction_required or expect_validation == "FAILED") and extracted:
         errs.append(f"Response.json has {extracted} extracted fields although extraction must be empty")
     # full extraction, not just the NOTE extracted for validation: several document types carry fields
-    if extraction_required and expect_validation != "FAILED" and len(extracted_types) < 3:
+    if extraction_required and expect_validation != "FAILED" and len(extracted_types) < min_types:
         errs.append(f"Response.json has extracted fields in only {sorted(extracted_types)} although whole-package extraction was required")
     if not str(doc.get("fileSize", "")).isdigit():
         errs.append(f"Response.json fileSize {doc.get('fileSize')!r} is not a byte count")
     return errs
+
+
+def response_summary(doc):
+    docs = doc.get("Documents") or {}
+    items = [(k, i) for k, v in docs.items() if isinstance(v, list) for i in v if isinstance(i, dict)]
+    return {
+        "documentTypes": len(docs),
+        "documents": len(items),
+        "extractedFields": sum(len(i.get("extraction") or {}) for _, i in items),
+        "documentTypesWithFields": sorted({k for k, i in items if i.get("extraction")}),
+        "files": sorted({str(i.get("fileName")) for _, i in items}),
+        "validationStatus": doc.get("validationStatus"),
+        "rows": [{"documentType": k, "fileName": i.get("fileName"), "docTypeId": i.get("docTypeId"), "docTypeName": i.get("docTypeName"),
+                  "pageRange": i.get("pageRange"), "duplicatePagesOf": i.get("duplicatePagesOf"),
+                  "fields": {n: (f or {}).get("Value") if isinstance(f, dict) else f for n, f in (i.get("extraction") or {}).items()}}
+                 for k, i in items],
+    }
+
+
+# ------------------------------------------------------------------ batch ledger (eOCR's record of each execution)
+#
+# One JSON document per eOCR execution (correlationId) in s3://<intake>/eocr-sim/batches/, updated with S3
+# conditional writes so the console, the callback receiver and scenario runs (a separate task) never lose each
+# other's updates. Lifecycle, as eOCR sees it:
+#   DRAFT -> STAGED (control file written) -> SUBMITTED (202 + aceJobId) -> IN_PROGRESS (Status API)
+#         -> CALLBACK_RECEIVED -> CLOSED (result retrieved and checked)         REJECTED: onboarding refused
+
+BATCH_PREFIX = f"{SIM_PREFIX}batches/"
+JOB_PREFIX = f"{SIM_PREFIX}jobs/"          # aceJobId -> correlationId
+ACTIVE_PREFIX = f"{SIM_PREFIX}active/"     # executions the console tracker polls
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+SAFE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._() -]{0,199}")
+TRACKED = {"SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED"}
+CALLBACK_GRACE_S = int(os.environ.get("SIM_CALLBACK_GRACE_SECONDS", "600"))
+MAX_EVENTS = 400
+
+
+class Conflict(Exception):
+    """The requested action does not fit the execution's current state."""
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def new_correlation_id():
+    return f"eocr-exec-{uuid.uuid4().hex[:12]}"
+
+
+def _precondition_failed(exc):
+    return getattr(exc, "response", {}).get("Error", {}).get("Code") in ("PreconditionFailed", "ConditionalRequestConflict")
+
+
+def add_event(batch, kind, message, **data):
+    batch.setdefault("events", []).append({"at": now_iso(), "type": kind, "message": message, **({"data": data} if data else {})})
+    del batch["events"][:-MAX_EVENTS]
+
+
+def load_batch(cid):
+    try:
+        obj = s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{BATCH_PREFIX}{cid}.json")
+    except s3.exceptions.NoSuchKey:
+        return None, None
+    return json.loads(obj["Body"].read()), obj["ETag"]
+
+
+def _save(batch, etag):
+    extra = {"IfMatch": etag} if etag else {"IfNoneMatch": "*"}
+    s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{BATCH_PREFIX}{batch['correlationId']}.json", Body=json.dumps(batch, indent=2, default=str).encode(),
+                  ContentType="application/json", **extra)
+    marker = f"{ACTIVE_PREFIX}{batch['correlationId']}"
+    if batch["state"] in TRACKED and batch.get("track", True):
+        s3.put_object(Bucket=INTAKE_BUCKET, Key=marker, Body=b"")
+    else:
+        s3.delete_object(Bucket=INTAKE_BUCKET, Key=marker)
+
+
+def create_batch(loan_id, correlation_id=None, loan_info=None, extraction_required=True, control_file_name="controlfile.json", source="console", track=True):
+    cid = correlation_id or new_correlation_id()
+    for label, value in (("loanId", loan_id), ("correlationId", cid)):
+        if not SAFE_ID.fullmatch(str(value or "")):
+            raise ValueError(f"{label} must be 1-128 characters of letters, digits, '.', '_' or '-'")
+    if not (SAFE_FILE.fullmatch(control_file_name) and control_file_name.endswith(".json")):
+        raise ValueError("control file name must be a plain file name ending in .json")
+    batch = {
+        "correlationId": cid, "loanId": loan_id, "source": source, "track": track, "state": "DRAFT",
+        "createdAt": now_iso(), "updatedAt": now_iso(),
+        "folder": f"loanId={loan_id}/correlationId={cid}/", "controlFileName": control_file_name,
+        "loanInfo": {k: str(v) for k, v in (loan_info or {}).items() if k not in ("loanId", "correlationId")},
+        "extractionRequired": bool(extraction_required), "controlOverride": None,
+        "documents": [], "controlFile": None, "batchPath": None, "aceJobId": None, "flaky": 0,
+        "status": None, "stages": [], "contractErrors": [], "callback": None, "result": None, "outcome": None,
+        "closedAt": None, "closedBy": None, "events": [],
+    }
+    add_event(batch, "created", f"execution {cid} created for loan {loan_id} ({source})")
+    try:
+        _save(batch, None)
+    except Exception as exc:
+        if _precondition_failed(exc):
+            raise Conflict(f"correlationId {cid} already exists") from exc
+        raise
+    return batch
+
+
+def update_batch(cid, change):
+    """Read-modify-write with an S3 ETag precondition; change(batch) mutates it and may raise Conflict."""
+    for attempt in range(10):
+        batch, etag = load_batch(cid)
+        if batch is None:
+            raise KeyError(cid)
+        before = json.dumps(batch, sort_keys=True, default=str)
+        change(batch)
+        if json.dumps(batch, sort_keys=True, default=str) == before:
+            return batch  # nothing changed: no write, so readers see a stable updatedAt
+        batch["updatedAt"] = now_iso()
+        try:
+            _save(batch, etag)
+            return batch
+        except Exception as exc:
+            if not _precondition_failed(exc):
+                raise
+            time.sleep(0.1 * (attempt + 1) + random.random() * 0.2)
+    raise RuntimeError(f"could not update execution {cid}: too many concurrent writers")
+
+
+def list_batches(limit=200):
+    objs = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=INTAKE_BUCKET, Prefix=BATCH_PREFIX):
+        objs += [o for o in page.get("Contents", []) if o["Key"].endswith(".json")]
+    objs.sort(key=lambda o: o["LastModified"], reverse=True)
+    out = []
+    for o in objs[:limit]:
+        b = json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=o["Key"])["Body"].read())
+        out.append({k: b.get(k) for k in ("correlationId", "loanId", "aceJobId", "state", "source", "createdAt", "updatedAt", "closedBy")}
+                   | {"status": (b.get("status") or {}).get("status"), "workflow": (b.get("status") or {}).get("workflow"),
+                      "outcome": b.get("outcome"), "documents": len(b.get("documents") or []), "resultOk": (b.get("result") or {}).get("ok")})
+    return out
+
+
+def index_job(job_id, cid):
+    s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{JOB_PREFIX}{job_id}.json", Body=json.dumps({"correlationId": cid}).encode(), ContentType="application/json")
+
+
+def batch_for_job(job_id):
+    try:
+        return json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{JOB_PREFIX}{job_id}.json")["Body"].read())["correlationId"]
+    except s3.exceptions.NoSuchKey:
+        return None
+
+
+def callback_records(job_id):
+    keys = sorted(o["Key"] for o in s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=f"{SIM_PREFIX}callbacks/{job_id}/").get("Contents", []))
+    return [json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=k)["Body"].read()) for k in keys]
+
+
+def build_control_file(batch):
+    if batch.get("controlOverride") is not None:
+        return batch["controlOverride"]
+    return {
+        "loanInfo": {"loanId": batch["loanId"], "correlationId": batch["correlationId"], **batch["loanInfo"]},
+        "extractionRequired": "true" if batch["extractionRequired"] else "false",
+        "documents": [{"fileName": d["fileName"], "contentType": d["contentType"]} for d in batch["documents"]],
+    }
+
+
+def retrieve_result(batch, code, batch_path):
+    """Spec 3.3 step 7: fetch *Response.json when batchPath is populated and check it (spec 6.4/6.5)."""
+    if not batch_path:
+        return {"ok": True, "key": None, "errors": [], "summary": None}
+    try:
+        doc = json.loads(s3.get_object(Bucket=OUTPUT_BUCKET, Key=batch_path)["Body"].read())
+    except Exception as exc:
+        return {"ok": False, "key": f"s3://{OUTPUT_BUCKET}/{batch_path}", "errors": [f"cannot read Response.json: {type(exc).__name__}: {exc}"], "summary": None}
+    expect = "FAILED" if code == 2000 else ("PASSED", "NA") if code == 0 else None
+    errs = check_response_file(doc, batch["aceJobId"], batch["extractionRequired"], {d["fileName"] for d in batch["documents"]}, expect, min_types=0) \
+        if isinstance(doc, dict) else ["Response.json is not a JSON object"]
+    return {"ok": not errs, "key": f"s3://{OUTPUT_BUCKET}/{batch_path}", "errors": errs, "summary": response_summary(doc) if isinstance(doc, dict) else None}
+
+
+def record_status(batch, body, source="tracker"):
+    """Fold one Status API response into the execution: stage transitions, contract errors, terminal notice."""
+    for e in check_status_response(body, batch["aceJobId"]):
+        if e not in batch["contractErrors"]:
+            batch["contractErrors"].append(e)
+            add_event(batch, "contract-error", e)
+    wf, st = body.get("workflow") or {}, body.get("status") or {}
+    key = [wf.get("stage"), wf.get("state"), st.get("code")]
+    if not batch["stages"] or batch["stages"][-1]["key"] != key:
+        batch["stages"].append({"at": now_iso(), "key": key, "value": st.get("value"), "description": st.get("description")})
+        add_event(batch, "status", f"{wf.get('stage')}/{wf.get('state')} -> {st.get('code')} {st.get('value')}: {st.get('description')}", via=source)
+    if {k: v for k, v in (batch.get("status") or {}).items() if k != "timestamp"} != {k: v for k, v in body.items() if k != "timestamp"}:
+        batch["status"] = body
+    if batch["state"] == "SUBMITTED" and st.get("code") in (4000, 202):
+        batch["state"] = "IN_PROGRESS"
+    if st.get("code") in TERMINAL and batch["state"] in ("SUBMITTED", "IN_PROGRESS") and not batch.get("terminalSeenAt"):
+        batch["terminalSeenAt"] = time.time()
+        add_event(batch, "terminal", f"Status API reports {st.get('code')} {st.get('value')}; waiting for ACE's callback")
+    if batch.get("terminalSeenAt") and batch["state"] != "CLOSED" and not batch.get("callback") and not batch.get("callbackOverdue") \
+            and time.time() - batch["terminalSeenAt"] > CALLBACK_GRACE_S:
+        batch["callbackOverdue"] = True
+        add_event(batch, "warning", f"no callback {CALLBACK_GRACE_S}s after the Status API went terminal; close by reconciliation if it never comes")
+
+
+def refresh_status(cid, source="tracker"):
+    batch, _ = load_batch(cid)
+    if batch is None:
+        raise KeyError(cid)
+    if not batch.get("aceJobId"):
+        raise Conflict("execution has no aceJobId yet")
+    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}")
+    if code != 200 or not isinstance(body, dict):
+        return update_batch(cid, lambda b: add_event(b, "error", f"Status API -> HTTP {code}", body=body))
+    return update_batch(cid, lambda b: record_status(b, body, source))
+
+
+def on_callback(job_id, record):
+    """Called by the callback receiver for every delivery attempt: trace it and close the execution on the accepted one."""
+    cid = batch_for_job(job_id)
+    if not cid:
+        return
+    p = record["payload"]
+    st = p.get("status") if isinstance(p.get("status"), dict) else {}
+    info = {"attempt": record["attempt"], "answeredWith": record["answeredWith"], "idempotencyKey": record["idempotencyKey"], "caller": record["callerPrincipal"]}
+    if record["answeredWith"] != 200:
+        update_batch(cid, lambda b: add_event(b, "callback-refused", f"callback attempt {record['attempt']} refused with {record['answeredWith']} (simulated eOCR outage)", **info))
+        return
+    closed_already = []
+
+    def received(b):
+        if b["state"] == "CLOSED":
+            closed_already.append(True)
+            add_event(b, "callback-duplicate", f"callback attempt {record['attempt']} ({st.get('code')} {st.get('value')}) arrived after the execution "
+                      f"was closed by {b.get('closedBy')}; recorded, not processed again", **info)
+            return
+        b["state"] = "CALLBACK_RECEIVED"
+        b["callback"] = {**info, "receivedAt": record["receivedAt"], "contractErrors": record["contractErrors"], "payload": p}
+        add_event(b, "callback", f"callback accepted: {st.get('code')} {st.get('value')} - {st.get('description')}", **info)
+        for e in record["contractErrors"]:
+            add_event(b, "contract-error", e)
+
+    batch = update_batch(cid, received)
+    if closed_already:
+        return
+    result = retrieve_result(batch, st.get("code"), p.get("batchPath"))
+    try:  # eOCR validates the callback against the Status API before closing
+        code, body = call("GET", f"/integration/loan/status/{job_id}")
+    except Exception as exc:
+        code, body = None, f"{type(exc).__name__}: {exc}"
+
+    def close(b):
+        if isinstance(body, dict) and code == 200:
+            record_status(b, body, "callback reconciliation")
+            diff = [f for f in ("status", "batchPath", "failedDocuments") if body.get(f) != p.get(f)]
+            if diff:
+                add_event(b, "contract-error", f"callback differs from Status API in {diff}", statusApi={f: body.get(f) for f in diff})
+        else:
+            add_event(b, "warning", f"could not reconcile the callback with the Status API: HTTP {code}", body=body)
+        b["result"] = result
+        if result["key"]:
+            add_event(b, "result", f"Response.json {'retrieved and matches spec 6.4/6.5' if result['ok'] else 'has contract errors'}: {result['key']}",
+                      errors=result["errors"], **{k: v for k, v in (result["summary"] or {}).items() if k != "rows"})
+        b.update(state="CLOSED", closedAt=now_iso(), closedBy="callback",
+                 outcome={"code": st.get("code"), "value": st.get("value"), "description": st.get("description"),
+                          "batchPath": p.get("batchPath"), "failedDocuments": p.get("failedDocuments")})
+        add_event(b, "closed", f"execution closed on callback: {st.get('code')} {st.get('value')}")
+
+    update_batch(cid, close)
 
 
 # ------------------------------------------------------------------ callback receiver (serve)
@@ -210,32 +481,53 @@ class CallbackHandler(BaseHTTPRequestHandler):
         job_id = str(payload.get("aceJobId") or "unknown")
         if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", job_id):
             return self._reply(400, {"error": "invalid aceJobId"})
+        if not isinstance(payload, dict):
+            return self._reply(400, {"error": "body is not a JSON object"})
         base = f"{SIM_PREFIX}callbacks/{job_id}/"
-        attempts = len(s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=base).get("Contents", [])) + 1
         refuse = 0
         try:
             refuse = int(json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{job_id}")["Body"].read())["refuse"])
         except s3.exceptions.NoSuchKey:
             pass
-        answered = 503 if attempts <= refuse else 200
-        record = {
-            "receivedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "attempt": attempts,
-            "answeredWith": answered,
-            "callerPrincipal": principal.group(1) if principal else None,
-            "idempotencyKey": self.headers.get("Idempotency-Key"),
-            "contractErrors": check_callback(payload),
-            "payload": payload,
-        }
-        s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{base}{attempts:03d}.json", Body=json.dumps(record, indent=2).encode(), ContentType="application/json")
+        for _ in range(20):  # attempt numbers are claimed with a create-only write, so concurrent deliveries never share one
+            attempts = len(s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=base).get("Contents", [])) + 1
+            answered = 503 if attempts <= refuse else 200
+            record = {
+                "receivedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "attempt": attempts,
+                "answeredWith": answered,
+                "callerPrincipal": principal.group(1) if principal else None,
+                "idempotencyKey": self.headers.get("Idempotency-Key"),
+                "contractErrors": check_callback(payload),
+                "payload": payload,
+            }
+            try:
+                s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{base}{attempts:03d}.json", Body=json.dumps(record, indent=2).encode(),
+                              ContentType="application/json", IfNoneMatch="*")
+                break
+            except Exception as exc:
+                if not _precondition_failed(exc):
+                    raise
         log("callback received", aceJobId=job_id, attempt=attempts, answered=answered,
             code=(payload.get("status") or {}).get("code"), contractErrors=len(record["contractErrors"]), caller=record["callerPrincipal"])
+        threading.Thread(target=_trace_callback, args=(job_id, record), daemon=True).start()
         if answered == 503:
             return self._reply(503, {"error": "simulated intermittent eOCR outage"})
         self._reply(200, {"received": True})
 
 
+def _trace_callback(job_id, record):
+    try:
+        on_callback(job_id, record)
+    except Exception:
+        log("callback tracing failed", aceJobId=job_id, trace=traceback.format_exc()[-1500:])
+
+
 def serve():
+    if CONSOLE_PORT:
+        sys.modules.setdefault("eocr_sim", sys.modules[__name__])  # console shares this module, not a second copy
+        import console  # the operator console: same process, its own port, never behind the Lattice target group
+        console.start(CONSOLE_HOST, CONSOLE_PORT)
     log("eOCR simulator callback receiver listening", port=PORT, bucket=INTAKE_BUCKET)
     ThreadingHTTPServer(("0.0.0.0", PORT), CallbackHandler).serve_forever()
 
@@ -368,6 +660,13 @@ class Scenario:
     def err(self, what):
         self.result["errors"].append(what)
 
+    def trace(self, change):
+        """Mirror the run into the batch ledger so it shows in the console; never fails the scenario."""
+        try:
+            update_batch(self.correlation_id, change)
+        except Exception as exc:
+            log("ledger update failed", scenario=self.name, error=f"{type(exc).__name__}: {exc}")
+
     def stage(self):
         control = {
             "loanInfo": {"loanId": self.loan_id, "correlationId": self.correlation_id, **self.loan_info},
@@ -380,6 +679,16 @@ class Scenario:
             s3.put_object(Bucket=INTAKE_BUCKET, Key=self.folder + name, Body=data, ContentType=ct)
         s3.put_object(Bucket=INTAKE_BUCKET, Key=self.control_key, Body=json.dumps(control, indent=2).encode(), ContentType="application/json")
         self.result["controlFile"] = control
+        try:
+            create_batch(self.loan_id, self.correlation_id, self.loan_info, self.extraction_required, source=f"scenario:{self.name}", track=False)
+        except Exception as exc:
+            log("ledger create failed", scenario=self.name, error=f"{type(exc).__name__}: {exc}")
+
+        def staged(b):
+            b.update(state="STAGED", controlFile=control, controlOverride=control if self.control_override else None,
+                     documents=[{"fileName": n, "contentType": ct, "bytes": len(d), "uploadedAt": now_iso()} for n, ct, d in self.docs])
+            add_event(b, "staged", f"{len(self.docs)} documents + controlfile.json written to s3://{INTAKE_BUCKET}/{self.folder}")
+        self.trace(staged)
         self.ok(f"staged s3://{INTAKE_BUCKET}/{self.folder} ({len(self.docs)} documents + controlfile.json); batchPath sent: {self.batch_path}")
 
     def onboard(self):
@@ -397,6 +706,12 @@ class Scenario:
         if self.flaky:
             s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{self.job}", Body=json.dumps({"refuse": self.flaky}).encode())
             self.ok(f"eOCR callback endpoint will refuse the first {self.flaky} deliveries with 503")
+        index_job(self.job, self.correlation_id)
+
+        def submitted(b):
+            b.update(state="SUBMITTED", aceJobId=self.job, batchPath=self.batch_path, flaky=self.flaky, submittedAt=now_iso())
+            add_event(b, "submitted", f"onboarding -> HTTP 202, aceJobId {self.job}", request=body, response=resp)
+        self.trace(submitted)
         # idempotency: the same request again returns the same job
         _, again = call("POST", "/integration/loan/onboarding", body, expect=202)
         if again.get("aceJobId") != self.job:
@@ -414,6 +729,8 @@ class Scenario:
                 if e not in self.result["errors"]:
                     self.err(e)
             key = (body["workflow"].get("stage"), body["workflow"].get("state"), body["status"]["code"])
+            if key != last or body["status"]["code"] in TERMINAL:
+                self.trace(lambda b: record_status(b, body, f"scenario {self.name}"))
             if key != last:
                 self.result["stages"].append({"at": datetime.now(timezone.utc).strftime("%H:%M:%S"), "stage": key[0], "state": key[1], "code": key[2], "value": body["status"]["value"]})
                 log("status", scenario=self.name, aceJobId=self.job, stage=key[0], state=key[1], code=key[2])
@@ -496,16 +813,7 @@ class Scenario:
             errs = check_response_file(doc, self.job, self.extraction_required, names, self.expect_validation)
             for e in errs:
                 self.err(e)
-            docs = doc["Documents"]
-            summary = {
-                "documentTypes": len(docs),
-                "documents": sum(len(v) for v in docs.values()),
-                "extractedFields": sum(len(i["extraction"]) for v in docs.values() for i in v),
-                "documentTypesWithFields": sorted(k for k, v in docs.items() if any(i["extraction"] for i in v)),
-                "files": sorted({i["fileName"] for v in docs.values() for i in v}),
-                "validationStatus": doc["validationStatus"],
-                "sample": next(iter(docs.items())),
-            }
+            summary = {k: v for k, v in response_summary(doc).items() if k != "rows"} | {"sample": next(iter(doc["Documents"].items()))}
             self.result["responseFile"] = {"key": f"s3://{OUTPUT_BUCKET}/{p['batchPath']}", **summary}
             if not errs:
                 self.ok(f"Response.json at s3://{OUTPUT_BUCKET}/{p['batchPath']} matches spec 6.4/6.5: "
@@ -528,6 +836,8 @@ class Scenario:
             log("scenario error", scenario=self.name, trace=traceback.format_exc()[-1500:])
         self.result["minutes"] = round((time.time() - started) / 60, 1)
         self.result["passed"] = not self.result["errors"]
+        self.trace(lambda b: add_event(b, "scenario", f"scenario {self.name} {'PASSED' if self.result['passed'] else 'FAILED'}",
+                                       errors=self.result["errors"], checks=self.result["checks"]))
         self.done.set()
         return self.result
 

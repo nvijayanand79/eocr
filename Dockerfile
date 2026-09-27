@@ -8,8 +8,9 @@ ARG REQUIREMENTS=requirements-aws.txt
 WORKDIR /app
 COPY ${REQUIREMENTS} /app/requirements.txt
 RUN python -m pip install --no-cache-dir -r /app/requirements.txt
-COPY eocr_sim.py /app/eocr_sim.py
+COPY eocr_sim.py console.py console.html /app/
 RUN useradd --system --uid 10001 eocr
 USER eocr
+# 8080: eOCR callback endpoint (Lattice target). 8081: operator console, loopback only (SSM port-forward).
 EXPOSE 8080
 CMD ["python", "/app/eocr_sim.py", "serve"]
