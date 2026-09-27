@@ -577,15 +577,16 @@ async function drawJobs() {
 }
 
 // ================================================================== new job wizard
-const WZ = [["Loan details", "goes into the control file"], ["Documents", "uploaded to the S3 folder"], ["Control file", "generated for you"], ["Check S3 folder", "what ACE will read"], ["Submit", "call ACE"]];
+const WZ = [["Loan details", "goes into the control file"], ["Documents", "uploaded to the S3 folder"], ["Control file", "generated, editable"], ["Check S3 folder", "what ACE will read"], ["Submit", "call ACE"]];
 let wz = null;
 async function pageWizard(cid) {
-  wz = {cid, batch: null, step: 0, raw: false, uploads: {}, extraLoan: null};
+  wz = {cid, batch: null, step: 0, uploads: {}, extraLoan: null, cf: null, cfMode: "form"};
   if (cid) {
     try { wz.batch = await api("GET", "/api/batches/" + encodeURIComponent(cid)); } catch (e) { main().innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     if (!["DRAFT", "STAGED", "REJECTED"].includes(wz.batch.state)) { location.replace(`#/job/${encodeURIComponent(cid)}`); return; }
     wz.step = wz.batch.state === "DRAFT" ? (wz.batch.documents.length && !wz.batch.resubmissionOf ? 2 : 1) : wz.batch.state === "REJECTED" ? 4 : 3;
-    wz.raw = wz.batch.controlOverride != null;
+    const want = +new URLSearchParams(location.hash.split("?")[1] || "").get("step");
+    if (want >= 1 && want - 1 <= wzMaxStep()) wz.step = want - 1;
   }
   drawWizard();
 }
@@ -719,29 +720,114 @@ function controlChecks(cf, b) {
   add(b.documents.every(d => docs.some(x => x && x.fileName === d.fileName)), "every uploaded document is listed");
   return out;
 }
+const CT_SUGGEST = ["application/pdf", "image/tiff", "image/png", "image/jpeg", "application/json", "text/plain"];
+const STD_LOAN = ["loanId", "correlationId", "sellerLoanNumber", "loanAmount", "borrowerLastName"];
+const clone = v => JSON.parse(JSON.stringify(v ?? null));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function wzControl() {
-  const b = wz.batch, base = `/api/batches/${encodeURIComponent(b.correlationId)}`, cf = b.controlOverride || b.controlPreview;
-  const checks = controlChecks(cf, b), bad = checks.filter(c => !c[0]).length;
-  $("#wz-body").innerHTML = `<h2 style="font-size:17px">Control file</h2><p class="hint" style="margin:4px 0 14px">Generated from your loan details and the documents you added (spec 3.2).
-      It is written to S3 next to the documents when you continue.</p>
-    <div class="loc">${icon("file")}<span>s3://${esc(cfg.intakeBucket)}/${esc(b.folder)}${esc(b.controlFileName)}</span></div>
-    <div class="grid2" style="margin-top:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
-      <div>${wz.raw ? `<textarea id="w-json">${esc(JSON.stringify(cf, null, 2))}</textarea>` : `<pre class="json">${jsonHtml(cf)}</pre>`}
-        <div class="toolbar" style="margin-top:10px">${wz.raw ? `<button class="btn sm" id="w-use">Use my JSON</button><button class="btn sm ghost" id="w-gen">Back to the generated file</button>`
-          : `<button class="btn sm ghost" id="w-edit">Edit by hand (advanced, for negative tests)</button>`}<span class="spacer"></span>${b.controlOverride ? pill("hand-edited", "warn") : pill("generated", "ok")}</div></div>
-      <div><div style="font-weight:600;margin-bottom:8px">Checks against spec 3.2</div>
-        <ul class="checks">${checks.map(([ok, t]) => `<li><span class="${ok ? "y" : "n"}">${icon(ok ? "check" : "alert")}</span>${esc(t)}</li>`).join("")}</ul>
-        ${bad ? `<p class="hint" style="color:var(--warn);margin-top:10px">${bad} check${bad > 1 ? "s" : ""} not met. Fine for a negative test; otherwise go back and fix it.</p>` : `<p class="okline" style="margin-top:10px">Ready to write.</p>`}</div></div>`;
-  if ($("#w-edit")) $("#w-edit").onclick = () => { wz.raw = true; wzControl(); };
-  if ($("#w-gen")) $("#w-gen").onclick = e => act(e.currentTarget, () => api("PUT", base + "/control", {controlOverride: null})).then(async r => { if (r) { wz.raw = false; await wzReload(); drawWizard(); } });
-  if ($("#w-use")) $("#w-use").onclick = e => { let v; try { v = JSON.parse($("#w-json").value); } catch (err) { return toast("JSON: " + err.message, true); }
-    act(e.currentTarget, () => api("PUT", base + "/control", {controlOverride: v}), "Hand-edited control file saved").then(async r => { if (r) { await wzReload(); drawWizard(); } }); };
+  const b = wz.batch, base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
+  // working copy of the control file, edited in place; kept across steps once the user has changed it
+  if (!wz.cf || wz.cfFor !== b.correlationId || same(wz.cf, wz.cfBase)) {
+    wz.cf = clone(b.controlOverride || b.controlPreview); wz.cfBase = clone(wz.cf); wz.cfFor = b.correlationId; wz.jsonError = null;
+  }
+  const edited = () => !same(wz.cf, b.controlPreview);
+  $("#wz-body").innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start">
+      <div style="flex:1;min-width:240px"><h2 style="font-size:17px">Control file</h2><p class="hint" style="margin:4px 0 0">Generated from your loan details and documents (spec 3.2).
+        Edit anything here; it is written to S3 next to the documents when you continue.</p></div>
+      <div class="seg" id="cf-mode"><button data-m="form" class="${wz.cfMode === "form" ? "on" : ""}">Form</button><button data-m="json" class="${wz.cfMode === "json" ? "on" : ""}">JSON</button></div></div>
+    <div class="loc" style="margin-top:14px">${icon("file")}<span>s3://${esc(cfg.intakeBucket)}/${esc(b.folder)}${esc(b.controlFileName)}</span></div>
+    <div id="cf-note" style="margin-top:12px"></div>
+    <div class="card" style="box-shadow:none;margin-top:12px"><div class="card-b" style="padding:12px 16px"><div style="font-weight:600;margin-bottom:8px">Checks against spec 3.2</div><div id="cf-checks"></div></div></div>
+    <div id="cf-editor" style="margin-top:14px"></div>
+    <details style="margin-top:14px" ${wz.cfMode === "form" ? "" : "hidden"} id="cf-prev-wrap"><summary>Preview the JSON that will be written</summary><pre class="json" id="cf-prev" style="margin-top:8px"></pre></details>`;
+  const refresh = () => {  // everything that follows the working copy, without re-rendering the inputs being typed in
+    const checks = controlChecks(wz.cf, b), bad = checks.filter(c => !c[0]).length;
+    $("#cf-checks").innerHTML = wz.jsonError ? `<p style="color:var(--bad);margin:0">${icon("alert")} Not valid JSON: ${esc(wz.jsonError)}</p>`
+      : `<ul class="checks" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));column-gap:18px">${checks.map(([ok, t]) => `<li><span class="${ok ? "y" : "n"}">${icon(ok ? "check" : "alert")}</span>${esc(t)}</li>`).join("")}</ul>
+        ${bad ? `<p class="hint" style="color:var(--warn);margin-top:10px">${bad} check${bad > 1 ? "s" : ""} not met. Fine for a negative test; otherwise fix it.</p>` : `<p class="okline" style="margin-top:10px">Ready to write.</p>`}`;
+    $("#cf-note").innerHTML = edited() ? `<div class="status-card warn" style="padding:10px 14px;margin:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span>${icon("alert")} <b>Edited by hand.</b> Changes in steps 1 and 2 no longer update this file.</span><span class="spacer"></span>
+        <button class="btn sm" id="cf-reset">Reset to the generated file</button></div>`
+      : `<div class="hint">${pill("generated", "ok")} Matches your loan details and documents.</div>`;
+    if ($("#cf-reset")) $("#cf-reset").onclick = () => { wz.cf = clone(b.controlPreview); wz.jsonError = null; drawEditor(); refresh(); };
+    if ($("#cf-prev")) $("#cf-prev").innerHTML = jsonHtml(wz.cf);
+  };
+  const drawEditor = () => {
+    if (wz.cfMode === "json") {
+      $("#cf-editor").innerHTML = `<textarea id="cf-json" spellcheck="false">${esc(JSON.stringify(wz.cf, null, 2))}</textarea>`;
+      $("#cf-json").oninput = e => { try { wz.cf = JSON.parse(e.target.value); wz.jsonError = null; } catch (err) { wz.jsonError = err.message; } refresh(); };
+      return;
+    }
+    const cf = wz.cf && typeof wz.cf === "object" && !Array.isArray(wz.cf) ? wz.cf : (wz.cf = {});
+    if (!cf.loanInfo || typeof cf.loanInfo !== "object") cf.loanInfo = {};
+    if (!Array.isArray(cf.documents)) cf.documents = [];
+    const keys = [...STD_LOAN.filter(k => k in cf.loanInfo), ...Object.keys(cf.loanInfo).filter(k => !STD_LOAN.includes(k))];
+    const missingStd = STD_LOAN.filter(k => !(k in cf.loanInfo));
+    const uploaded = b.documents.map(d => d.fileName);
+    const er = cf.extractionRequired;
+    $("#cf-editor").innerHTML = `
+      <div class="card" style="box-shadow:none"><div class="card-h"><h3>Loan information</h3><span class="sub">loanInfo</span></div>
+        <div class="tbl"><table><tr><th style="width:38%">Field</th><th>Value</th><th style="width:44px"></th></tr>
+        ${keys.map(k => `<tr><td>${STD_LOAN.includes(k) ? `<span class="mono">${esc(k)}</span>${["loanId", "correlationId"].includes(k) ? `<div class="hint">must match the S3 folder</div>` : ""}`
+            : `<input class="mono" data-lk="${esc(k)}" value="${esc(k)}" style="width:100%">`}</td>
+          <td><input class="mono" data-lv="${esc(k)}" value="${esc(cf.loanInfo[k] ?? "")}" style="width:100%"></td>
+          <td><button class="btn sm ghost danger" data-ldel="${esc(k)}" title="Remove the field">${icon("x")}</button></td></tr>`).join("")}</table></div>
+        <div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap;padding-top:10px">
+          <button class="btn sm" id="cf-addf">${icon("plus")}Add a field</button>
+          ${missingStd.map(k => `<button class="btn sm ghost" data-lstd="${esc(k)}">${icon("plus")}${esc(k)}</button>`).join("")}</div></div>
+      <div class="card" style="box-shadow:none;margin-top:14px"><div class="card-h"><h3>Extraction</h3><span class="sub">extractionRequired</span></div><div class="card-b">
+        <select id="cf-er" style="width:100%">
+          <option value="true" ${er === "true" ? "selected" : ""}>"true": extract fields from the whole package</option>
+          <option value="false" ${er === "false" ? "selected" : ""}>"false": classify only</option>
+          ${!["true", "false"].includes(er) ? `<option value="__keep" selected>${esc(JSON.stringify(er))} (not allowed by the spec)</option>` : ""}
+          <option value="__custom">Another value (negative test)…</option></select></div></div>
+      <div class="card" style="box-shadow:none;margin-top:14px"><div class="card-h"><h3>Documents</h3><span class="sub">what ACE is told to read</span></div>
+        ${cf.documents.length ? `<div class="tbl"><table><tr><th>fileName</th><th>contentType</th><th style="width:44px"></th></tr>
+        ${cf.documents.map((d, i) => `<tr><td><input class="mono" list="cf-files" data-dn="${i}" value="${esc((d || {}).fileName ?? "")}" style="width:100%">
+            ${d && d.fileName && !uploaded.includes(d.fileName) ? `<div style="color:var(--warn);font-size:12px">not uploaded</div>` : ""}</td>
+          <td><input class="mono" list="cf-types" data-dt="${i}" value="${esc((d || {}).contentType ?? "")}" style="width:100%"></td>
+          <td><button class="btn sm ghost danger" data-ddel="${i}" title="Remove from the control file">${icon("x")}</button></td></tr>`).join("")}</table></div>`
+          : `<div class="empty" style="padding:18px">The control file lists no documents.</div>`}
+        <div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap;padding-top:10px">
+          <button class="btn sm" id="cf-addd">${icon("plus")}Add a document</button><button class="btn sm ghost" id="cf-sync">Match the uploaded files</button></div></div>
+      <datalist id="cf-files">${uploaded.map(n => `<option value="${esc(n)}">`).join("")}</datalist>
+      <datalist id="cf-types">${CT_SUGGEST.map(t => `<option value="${esc(t)}">`).join("")}</datalist>`;
+    const E = $("#cf-editor");
+    $$("[data-lv]", E).forEach(x => x.oninput = () => { cf.loanInfo[x.dataset.lv] = x.value; refresh(); });
+    $$("[data-lk]", E).forEach(x => x.onchange = () => {  // rename a custom field, keeping its value and position
+      const old = x.dataset.lk, nk = x.value.trim();
+      if (!nk || nk === old) { x.value = old; return; }
+      if (nk in cf.loanInfo) { toast(`loanInfo already has ${nk}`, true); x.value = old; return; }
+      cf.loanInfo = Object.fromEntries(Object.entries(cf.loanInfo).map(([k, v]) => [k === old ? nk : k, v])); drawEditor(); refresh(); });
+    $$("[data-ldel]", E).forEach(x => x.onclick = () => { delete cf.loanInfo[x.dataset.ldel]; drawEditor(); refresh(); });
+    $$("[data-lstd]", E).forEach(x => x.onclick = () => { cf.loanInfo[x.dataset.lstd] = x.dataset.lstd === "loanId" ? b.loanId : x.dataset.lstd === "correlationId" ? b.correlationId : ""; drawEditor(); refresh(); });
+    $("#cf-addf").onclick = () => { let n = "newField", i = 2; while (n in cf.loanInfo) n = `newField${i++}`; cf.loanInfo[n] = ""; drawEditor(); refresh();
+      const f = $(`[data-lk="${n}"]`); if (f) { f.focus(); f.select(); } };
+    $("#cf-er").onchange = e => {
+      if (e.target.value === "__custom") { const v = prompt('extractionRequired value (the spec allows only "true" or "false"):', ""); if (v !== null) cf.extractionRequired = v; drawEditor(); }
+      else if (e.target.value !== "__keep") cf.extractionRequired = e.target.value;
+      refresh(); };
+    $$("[data-dn]", E).forEach(x => x.oninput = () => { cf.documents[+x.dataset.dn] = {...(cf.documents[+x.dataset.dn] || {}), fileName: x.value}; refresh(); });
+    $$("[data-dn]", E).forEach(x => x.onchange = () => { const d = b.documents.find(u => u.fileName === x.value), row = cf.documents[+x.dataset.dn];
+      if (d && !row.contentType) row.contentType = d.contentType; drawEditor(); refresh(); });
+    $$("[data-dt]", E).forEach(x => x.oninput = () => { cf.documents[+x.dataset.dt] = {...(cf.documents[+x.dataset.dt] || {}), contentType: x.value}; refresh(); });
+    $$("[data-ddel]", E).forEach(x => x.onclick = () => { cf.documents.splice(+x.dataset.ddel, 1); drawEditor(); refresh(); });
+    $("#cf-addd").onclick = () => { const next = uploaded.find(n => !cf.documents.some(d => d && d.fileName === n));
+      cf.documents.push({fileName: next || "", contentType: next ? (b.documents.find(d => d.fileName === next) || {}).contentType : "application/pdf"}); drawEditor(); refresh(); };
+    $("#cf-sync").onclick = () => { cf.documents = b.documents.map(d => ({fileName: d.fileName, contentType: d.contentType})); drawEditor(); refresh(); };
+  };
+  $("#cf-mode").onclick = e => { const m = e.target.closest("button"); if (!m || m.dataset.m === wz.cfMode) return;
+    if (wz.cfMode === "json" && wz.jsonError) return toast("Fix the JSON first: " + wz.jsonError, true);
+    wz.cfMode = m.dataset.m; $$("#cf-mode button").forEach(x => x.classList.toggle("on", x === m)); $("#cf-prev-wrap").hidden = wz.cfMode !== "form"; drawEditor(); refresh(); };
+  drawEditor(); refresh();
   wzFoot("Write the control file to S3", async btn => {
-    if (wz.raw) { let v; try { v = JSON.parse($("#w-json").value); } catch (err) { return toast("JSON: " + err.message, true); }
-      if (!await act(btn, () => api("PUT", base + "/control", {controlOverride: v}))) return; }
-    if (!await act(btn, () => api("POST", base + "/stage"), "Control file written to S3")) return;
-    await wzReload(); wz.step = 3; drawWizard();
-  }, {icon: "upload"});
+    if (wz.jsonError) return toast("Fix the JSON first: " + wz.jsonError, true);
+    if (!wz.cf || typeof wz.cf !== "object" || Array.isArray(wz.cf)) return toast("The control file must be a JSON object", true);
+    const override = edited() ? wz.cf : null;
+    if (!same(override, b.controlOverride ?? null) && !await act(btn, () => api("PUT", base + "/control", {controlOverride: override}))) return;
+    if (!await act(btn, () => api("POST", base + "/stage"), override ? "Your edited control file was written to S3" : "Control file written to S3")) return;
+    await wzReload(); wz.cf = null; wz.step = 3; drawWizard();  // written: the server copy is the truth again
+  }, {icon: "upload", msg: "Not written yet: edits are kept while you stay in this setup"});
 }
 async function wzFolder() {
   const b = wz.batch;
@@ -875,7 +961,10 @@ function tabOverview(b) {
   const cf = b.controlFile || b.controlPreview || {}, li = cf.loanInfo || {}, sm = (b.result || {}).summary, v = b.validation || {};
   const applicable = (b.specChecklist || []).filter(x => x.result !== "n/a");
   $("#tab").innerHTML = `<div class="grid2">
-    <div class="card"><div class="card-h"><h3>What was sent</h3><a class="right" href="#/job/${encodeURIComponent(b.correlationId)}/files">Files in S3</a></div><div class="card-b">
+    <div class="card"><div class="card-h"><h3>${["DRAFT", "STAGED", "REJECTED"].includes(b.state) ? "What will be sent" : "What was sent"}</h3><span class="right">
+      ${["DRAFT", "STAGED", "REJECTED"].includes(b.state) ? `<a class="btn sm" href="#/job/${encodeURIComponent(b.correlationId)}/setup?step=3">${icon("file")}Edit the control file</a>`
+        : `<span class="hint" title="ACE has read it; submit a new job to change it">control file locked after submission</span>`}
+      <a href="#/job/${encodeURIComponent(b.correlationId)}/files">Files in S3</a></span></div><div class="card-b">
       <dl class="kv"><dt>Loan ID</dt><dd><b>${esc(li.loanId || b.loanId)}</b></dd><dt>Seller loan number</dt><dd class="mono">${esc(li.sellerLoanNumber)}</dd>
         <dt>Loan amount</dt><dd class="mono">${esc(li.loanAmount)}</dd><dt>Borrower last name</dt><dd class="mono">${esc(li.borrowerLastName)}</dd>
         <dt>Extraction</dt><dd>${esc(cf.extractionRequired)} ${cf.extractionRequired === "true" ? "(whole package)" : cf.extractionRequired === "false" ? "(classification only)" : ""}</dd>

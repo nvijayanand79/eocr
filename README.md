@@ -44,7 +44,10 @@ step traced end to end.
 - **New job**: a full-page wizard. 1 *Loan details* (the control file's loanInfo, extraction on/off, fill from the
   test loan) · 2 *Documents* (drag and drop or pick files; each uploads straight into the job's S3 folder with a
   progress bar; test files: a loan package slice with the NOTE, a password-protected PDF, a corrupt PDF) ·
-  3 *Control file* (generated from steps 1 and 2 and checked against spec 3.2; hand editing for negative tests) ·
+  3 *Control file* (generated from steps 1 and 2, then editable: a form for every loanInfo field (add your own,
+  remove any), extractionRequired and the documents list (file name, content type, add/remove, match the uploads),
+  or the raw JSON; spec 3.2 checks and a JSON preview update as you type; "Reset to the generated file" undoes the
+  edits. The file stays editable until the job is submitted; after that ACE has read it and it is locked) ·
   4 *Check S3 folder* (the objects S3 actually holds, each with its role, against the control file) · 5 *Submit*
   (ACE endpoint, batchPath, simulated callback outage, the exact request). A side panel shows the job, the target S3
   folder and its files throughout; progress is saved at every step, and a draft reopens where it stopped.
