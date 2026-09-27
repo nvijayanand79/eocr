@@ -251,8 +251,8 @@ PRESETS = [
      "what": "The control file's loanId differs from the folder and the request. ACE should reject the control file at pre-check.",
      "docs": [["package", 20]], "expect": {"code": 1000, "failedDocuments": [{"documentName": "{controlFileName}", "reason": "Loan ID Mismatch"}]}},
     {"key": "note-mismatch", "title": "Loan data differs from the NOTE", "group": "negative",
-     "loanInfo": {"loanAmount": "1.00", "sellerLoanNumber": "0000000000"}, "autoHitl": ["loanAmount", "sellerLoanNumber"],
-     "what": "Wrong loan amount and seller loan number. ACE should pause for HITL review; the simulator confirms the mismatches and ACE ends in VALIDATION_FAILED.",
+     "loanInfo": {"loanAmount": "1.00", "sellerLoanNumber": "0000000000"},
+     "what": "Wrong loan amount and seller loan number. ACE should pause for its NOTE review; when the ACE reviewer confirms the mismatches, ACE ends in VALIDATION_FAILED.",
      "docs": [["package", 30]], "expect": {"code": 2000, "validationStatus": "FAILED", "descriptionContains": ["Loan Amount", "Seller Loan Number"]}},
 ]
 PRESET = {p["key"]: p for p in PRESETS}
@@ -279,13 +279,13 @@ def apply_preset(cid, key):
         if control is not None:
             b["controlOverride"] = control
         b["expectation"] = {"preset": key, "title": p["title"], "specClean": True, **expect}
-        b["plan"] = {"flaky": p.get("flaky", 0), "autoHitl": p.get("autoHitl") or []}
+        b["plan"] = {"flaky": p.get("flaky", 0)}
         add_event(b, "test", f"test preset “{p['title']}”: {p['what']}")
     return update_batch(cid, change)
 
 
 def set_expectation(cid, body):
-    """Set or clear what the test expects, and the HITL answers the simulator should give by itself."""
+    """Set or clear what the test expects."""
     exp = body.get("expectation")
     if exp is not None:
         if not isinstance(exp, dict):
@@ -301,29 +301,17 @@ def set_expectation(cid, body):
                "minCallbackAttempts": int(exp["minCallbackAttempts"]) if str(exp.get("minCallbackAttempts") or "").isdigit() else None,
                "specClean": bool(exp.get("specClean", True))}
         exp = {k: v for k, v in exp.items() if v not in (None, [], "")} | {"specClean": exp["specClean"]}
-    auto = [str(x) for x in body.get("autoHitl") or []] if "autoHitl" in body else None
 
     def change(b):
         if b["state"] == "CLOSED":
             raise Conflict("the job is closed; its verdict is final")
         b["expectation"] = exp
-        if auto is not None:
-            b["plan"] = {**(b.get("plan") or {}), "autoHitl": auto}
         add_event(b, "test", "expected outcome " + ("cleared" if exp is None else f"set: {exp.get('title')}"))
     return update_batch(cid, change)
 
 
-def auto_hitl(batch):
-    """The simulator answers ACE's HITL review itself when the test says which fields are wrong."""
-    wanted = (batch.get("plan") or {}).get("autoHitl")
-    wf = ((batch.get("status") or {}).get("workflow") or {})
-    if not wanted or wf.get("state") != "HITL_PENDING" or ((batch.get("hitl") or {}).get("decision")):
-        return
-    r = hitl_review(batch["correlationId"])
-    fields = ((r.get("review") or {}).get("fieldDetails")) or []
-    if fields:
-        hitl_decide(batch["correlationId"], [{"fieldName": f.get("fieldName"), "metadataValue": f.get("metadataValue"),
-                                              "extractedValue": f.get("extractedValue"), "isMatched": f.get("fieldName") not in wanted} for f in fields])
+REVIEW_IN_ACE = ("reviews are done in ACE by the loan's assigned reviewer (classification/collation review, NOTE review, "
+                 "extraction review); the simulator only tracks the job while ACE waits")
 
 
 def test_loan():
@@ -426,29 +414,8 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
 
 
 def hitl_review(cid):
-    batch = get(cid)
-    code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]}, base=batch.get("aceUrl"), job=cid)
-    if code == 200 and isinstance(body, dict) and isinstance(body.get("fieldDetails"), list):
-        def keep(b):  # the review is what the NOTE said; keep it for the validation view after the job ends
-            b["hitl"] = {**(b.get("hitl") or {}), "loadedAt": now_iso(), "loadedBy": sim.operator(), "fields": body["fieldDetails"],
-                         "totalMatches": body.get("totalMatches")}
-            add_event(b, "hitl", f"HITL review loaded: {len(body['fieldDetails'])} fields, totalMatches {body.get('totalMatches')}")
-        update_batch(cid, keep)
-    return {"httpStatus": code, "review": body}
-
-
-def hitl_decide(cid, fields):
-    """Acts as the ACE HITL reviewer (not an eOCR step) so a VALIDATION_FAILED or HITL path can be closed from here."""
-    batch = get(cid)
-    code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields}, base=batch.get("aceUrl"), job=cid)
-    rejected = [f["fieldName"] for f in fields if not f.get("isMatched")]
-
-    def keep(b):
-        b["hitl"] = {**(b.get("hitl") or {}), "decision": {"at": now_iso(), "by": sim.operator(), "httpStatus": code,
-                                                         "fields": [{"fieldName": f.get("fieldName"), "isMatched": bool(f.get("isMatched"))} for f in fields]}}
-        add_event(b, "hitl", f"HITL reviewer decision sent -> HTTP {code}; mismatched: {rejected or 'none'}", response=body)
-    update_batch(cid, keep)
-    return {"httpStatus": code, "response": body}
+    """ACE's reviews belong to ACE: the loan's reviewer works them on ACE's screens (design D5/D6)."""
+    raise Conflict(REVIEW_IN_ACE)
 
 
 def close(cid, note=""):
@@ -713,8 +680,8 @@ def notify_state(cid):
     who = f"Loan {b['loanId']} ({cid})"
     wf = ((b.get("status") or {}).get("workflow") or {})
     if b["state"] in ("SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED"):
-        if wf.get("state") == "HITL_PENDING" and not (b.get("plan") or {}).get("autoHitl"):
-            notify(cid, "hitl", f"{who} is waiting for a HITL review in ACE.")
+        if wf.get("state") == "HITL_PENDING":
+            notify(cid, "hitl", f"{who} is waiting for a review in ACE.")
         if b.get("callbackOverdue"):
             notify(cid, "no-callback", f"{who}: ACE finished but has not called back.")
         updated = datetime_ts(b.get("updatedAt"))
@@ -890,7 +857,6 @@ def tracker():
                 try:
                     batch = sim.refresh_status(cid)
                     if batch:
-                        auto_hitl(batch)
                         notify_state(cid)
                 except KeyError:
                     store.get().delete(key)
@@ -1041,7 +1007,7 @@ def _create(h, q):
 
 @route("GET", r"/api/presets")
 def _presets(h, q):
-    return [{k: p.get(k) for k in ("key", "title", "group", "what", "expect", "flaky", "autoHitl", "loanInfo", "extraction", "docs")} for p in PRESETS]
+    return [{k: p.get(k) for k in ("key", "title", "group", "what", "expect", "flaky", "loanInfo", "extraction", "docs")} for p in PRESETS]
 
 
 @route("PUT", CID + r"/expectation")
@@ -1101,7 +1067,7 @@ def _hitl_get(h, q, cid):
 
 @route("POST", CID + r"/hitl")
 def _hitl_post(h, q, cid):
-    return hitl_decide(cid, h.json().get("fields") or [])
+    return hitl_review(cid)
 
 
 @route("POST", CID + r"/close")

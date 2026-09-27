@@ -1514,27 +1514,16 @@ class Scenario:
                 self.result["stages"].append({"at": datetime.now(timezone.utc).strftime("%H:%M:%S"), "stage": key[0], "state": key[1], "code": key[2], "value": body["status"]["value"]})
                 log("status", scenario=self.name, aceJobId=self.job, stage=key[0], state=key[1], code=key[2])
                 last = key
-            if key[1] == "HITL_PENDING" and self.hitl_reject:
-                self.hitl_review()
+            if key[1] == "HITL_PENDING" and key != getattr(self, "_waiting", None):
+                # reviews belong to ACE: the loan's assigned reviewer works them on ACE's screens
+                self._waiting = key
+                self.ok(f"waiting for the ACE reviewer ({key[0]} review of {self.job})"
+                        + (f"; the test expects the NOTE fields {self.hitl_reject} to be ruled mismatched" if self.hitl_reject and key[0] == "VALIDATION" else ""))
             if body["status"]["code"] in TERMINAL:
                 self.final_status = body
                 return body
             time.sleep(15)
         raise AssertionError(f"job {self.job} not terminal after {timeout_s}s; last={last}")
-
-    def hitl_review(self):
-        """Acts as the ACE HITL reviewer (not eOCR): confirms the mismatches ACE found."""
-        _, review = call("POST", "/validate/reviewValidation", {"clientLoanNumber": self.loan_id, "adr": self.job}, expect=200, job=self.correlation_id)
-        fields = [{"fieldName": f["fieldName"], "metadataValue": f.get("metadataValue"), "extractedValue": f.get("extractedValue"),
-                   "isMatched": f["fieldName"] not in self.hitl_reject} for f in review["fieldDetails"]]
-        self.ok(f"HITL review shown to reviewer: totalMatches={review['totalMatches']}, fields={[(f['fieldName'], f.get('isMatched')) for f in review['fieldDetails']]}")
-        code, resp = call("POST", "/validate/updateValidation", {"clientLoanNumber": self.loan_id, "adr": self.job, "updatedFields": fields}, job=self.correlation_id)
-        self.ok(f"HITL reviewer confirmed mismatches {self.hitl_reject} -> HTTP {code}")
-        self.trace(lambda b: b.update(hitl={"loadedAt": now_iso(), "loadedBy": operator(), "fields": review["fieldDetails"],
-                                            "totalMatches": review.get("totalMatches"),
-                                            "decision": {"at": now_iso(), "by": operator(), "httpStatus": code,
-                                                         "fields": [{"fieldName": f["fieldName"], "isMatched": f["isMatched"]} for f in fields]}}))
-        self.hitl_reject = []
 
     def callbacks(self, timeout_s=900):
         deadline = time.time() + timeout_s

@@ -355,11 +355,6 @@ dialog .d-f { padding: 14px 20px; border-top: 1px solid var(--line); display: fl
 <dialog id="dlg-view"><div class="d-h"><h3 id="v-title">File</h3><span class="spacer"></span><a class="btn sm" id="v-dl" href="#"><svg class="i"><use href="#i-download"/></svg>Download</a></div>
   <div class="d-b"><pre id="v-body"></pre></div><div class="d-f"><button class="btn" id="v-close">Close</button></div></dialog>
 
-<dialog id="dlg-hitl"><div class="d-h"><h3>HITL review</h3></div>
-  <div class="d-b"><p class="hint" style="margin:0">ACE paused because it could not confirm some loan data against the NOTE. Acting as the ACE reviewer, mark each field as
-    matching or not, then send the decision. (This step belongs to ACE, not eOCR; the console lets you finish the test.)</p><div id="hitl-body"></div></div>
-  <div class="d-f"><button class="btn" id="hitl-cancel">Cancel</button><button class="btn primary" id="hitl-send">Send decision</button></div></dialog>
-
 <dialog id="dlg-help"><div class="d-h"><h3>How the eOCR simulator works</h3></div>
   <div class="d-b">
     <p style="margin:0">The console plays <b>eOCR</b> in the ACE to eOCR integration (spec v1.1). A <b>job</b> is one eOCR execution for one loan.</p>
@@ -680,7 +675,7 @@ async function wzLoan() {
         <label class="field"><span>Control file name</span><input id="w-cf" value="${esc(b ? b.controlFileName : "controlfile.json")}" ${b ? "disabled" : ""}></label></div></details>
     </div>
     <div style="margin-top:18px"><button class="btn sm" id="w-fill">${icon("file")}Fill from the environment's test loan</button></div>
-    ${picked ? `<p class="hint" style="margin-top:14px">${icon("info")} This test stages ${esc(picked.docs.map(d => d[0] === "package" ? `a ${d[1]}-page package slice` : d[0] === "locked" ? "locked.pdf" : "broken.pdf").join(" and "))}${picked.flaky ? `, refuses the first ${picked.flaky} callbacks` : ""}${picked.autoHitl && picked.autoHitl.length ? ", and answers ACE's HITL review itself" : ""}. You can change any of it in the next steps.</p>` : ""}`;
+    ${picked ? `<p class="hint" style="margin-top:14px">${icon("info")} This test stages ${esc(picked.docs.map(d => d[0] === "package" ? `a ${d[1]}-page package slice` : d[0] === "locked" ? "locked.pdf" : "broken.pdf").join(" and "))}${picked.flaky ? `, refuses the first ${picked.flaky} callbacks` : ""}. You can change any of it in the next steps.</p>` : ""}`;
   const fillTest = async () => { const t = await api("GET", "/api/testloan"); if (t.error) throw new Error("No test loan: " + t.error);
     if (!wz.batch) $("#w-loan").value = t.loanId; const l = {...(t.loanInfo || {}), ...((picked || {}).loanInfo || {})}; wz.extraLoan = t.loanInfo || {};
     $("#w-seller").value = l.sellerLoanNumber || ""; $("#w-amount").value = l.loanAmount || ""; $("#w-borrower").value = l.borrowerLastName || ""; return t; };
@@ -889,7 +884,7 @@ async function wzFolder() {
 function wzSubmit() {
   const b = wz.batch, rejected = b.state === "REJECTED", ev = (b.events || []).filter(e => e.type === "rejected").pop();
   const plan = b.plan || {};
-  if (wz.exp === undefined) { wz.exp = b.expectation ? clone(b.expectation) : null; wz.autoHitl = plan.autoHitl || []; }
+  if (wz.exp === undefined) { wz.exp = b.expectation ? clone(b.expectation) : null; }
   const exp = wz.exp;
   const preview = mode => ({loanId: b.loanId, correlationId: b.correlationId, batchPath: mode === "folder" ? b.folder : b.folder + b.controlFileName});
   $("#wz-body").innerHTML = `<h2 style="font-size:17px">Submit to ACE</h2><p class="hint" style="margin:4px 0 16px">The console calls ACE's onboarding API (spec 4). ACE answers with an ACE job ID and
@@ -917,7 +912,6 @@ function wzSubmit() {
         <label class="field"><span>NOTE validation</span><select id="x-vs"><option value="">not checked</option>${["PASSED", "FAILED", "NA"].map(v => `<option ${e.validationStatus === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
         <label class="field"><span>ACE's description mentions</span><input id="x-desc" value="${esc((e.descriptionContains || []).join(", "))}" placeholder="comma-separated, e.g. Loan Amount"></label>
         <label class="field"><span>Callback delivered on attempt</span><input id="x-att" type="number" min="1" value="${esc(e.minCallbackAttempts || "")}" placeholder="any"><small>or later; pair with the outage above</small></label>
-        <label class="field"><span>Answer ACE's HITL review</span><input id="x-hitl" value="${esc((wz.autoHitl || []).join(", "))}" placeholder="fields to mark as mismatched"><small>empty: a person answers it</small></label>
       </div>
       <div style="margin-top:14px"><div style="font-weight:600;font-size:12.5px;margin-bottom:6px">Documents ACE should reject at pre-check</div>
         <div id="x-docs">${(e.failedDocuments || []).map((f, i) => `<div class="toolbar" style="margin-bottom:6px"><input class="mono" data-fn="${i}" value="${esc(f.documentName)}" placeholder="file name" list="x-files" style="flex:1">
@@ -928,7 +922,6 @@ function wzSubmit() {
     const sync = () => { e.title = $("#x-title").value; const c = $("#x-code").value; e.code = c === "" ? null : c === "REJECTED" ? c : +c;
       e.validationStatus = $("#x-vs").value || null; e.descriptionContains = $("#x-desc").value.split(",").map(t => t.trim()).filter(Boolean);
       e.minCallbackAttempts = +$("#x-att").value || null; e.specClean = $("#x-spec").checked;
-      wz.autoHitl = $("#x-hitl").value.split(",").map(t => t.trim()).filter(Boolean);
       e.failedDocuments = $$("[data-fn]").map(x => ({documentName: x.value.trim(), reason: $(`[data-fr="${x.dataset.fn}"]`).value.trim()})).filter(f => f.documentName); };
     $("#x-body").oninput = sync; $("#x-body").onchange = sync;
     $("#x-adddoc").onclick = () => { sync(); e.failedDocuments.push({documentName: "", reason: ""}); drawExp(); };
@@ -938,8 +931,8 @@ function wzSubmit() {
   if (exp) drawExp();
   wzFoot(rejected ? "Submit again" : "Submit to ACE", async btn => {
     const want = $("#x-on").checked ? wz.exp : null;
-    if (!same(want, b.expectation ?? null) || !same(wz.autoHitl || [], plan.autoHitl || [])) {
-      if (!await act(btn, () => api("PUT", `/api/batches/${encodeURIComponent(b.correlationId)}/expectation`, {expectation: want, autoHitl: wz.autoHitl || []}))) return;
+    if (!same(want, b.expectation ?? null)) {
+      if (!await act(btn, () => api("PUT", `/api/batches/${encodeURIComponent(b.correlationId)}/expectation`, {expectation: want}))) return;
     }
     const r = await act(btn, () => api("POST", `/api/batches/${encodeURIComponent(b.correlationId)}/submit`, {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}));
     if (!r) return;
@@ -1009,7 +1002,7 @@ function trackHtml(steps) {
 function statusCard(b, ex) {
   const tone = ex.tone || "info", ic = {ok: "ok", bad: "alert", warn: "alert", info: "clock", idle: "info"}[tone];
   const actions = [];
-  if (OPEN(b) && wfOf(b).state === "HITL_PENDING") actions.push(`<button class="btn primary" id="x-hitl">Open the HITL review</button>`);
+  if (OPEN(b) && wfOf(b).state === "HITL_PENDING") actions.push(`<span class="hint">${icon("info")} Waiting for the ACE reviewer: open ${esc(b.aceJobId || "the ADR")} in ACE to review it.</span>`);
   if (OPEN(b) && b.callbackOverdue) actions.push(`<button class="btn primary" id="x-reconcile">Close from the Status API</button>`);
   if (b.state === "CLOSED" && tone !== "ok" && b.documents.length) actions.push(`<button class="btn primary" id="x-resubmit">${icon("copy")}Resubmit as new job</button>`);
   if (["DRAFT", "STAGED", "REJECTED"].includes(b.state)) actions.push(`<a class="btn primary" href="#/job/${encodeURIComponent(b.correlationId)}/setup">${b.state === "REJECTED" ? "Fix and submit again" : "Continue setup"}</a>`);
@@ -1047,7 +1040,6 @@ function wireJob(b) {
   on("#a-close", () => { $("#c-note").value = ""; $("#dlg-close").showModal(); });
   on("#x-reconcile", () => { $("#c-note").value = "no callback from ACE"; $("#dlg-close").showModal(); });
   on("#x-copy", () => navigator.clipboard.writeText(failureText(b)).then(() => toast("Failure summary copied"), () => toast("Copy failed", true)));
-  on("#x-hitl", () => openHitl(b));
   $("#c-ok").onclick = e => act(e.currentTarget, () => api("POST", base + "/close", {note: $("#c-note").value}), "Job closed").then(r => { $("#dlg-close").close(); if (r) reload(); });
   bindCopy();
 }
@@ -1198,18 +1190,6 @@ function tabActivity(b) {
       ${evs.map(e => `<div class="ev"><div class="t">${when(e.at)}${pill(e.type, tone(e.type), "nodot")}</div>
         <div>${esc(e.message)}${e.by ? ` <span class="hint">— ${esc(e.by)}</span>` : ""}${e.data ? `<details><summary>details</summary><pre style="margin-top:6px">${esc(JSON.stringify(e.data, null, 2))}</pre></details>` : ""}</div></div>`).join("")}</div></div></div>`;
 }
-async function openHitl(b) {
-  const base = `/api/batches/${encodeURIComponent(b.correlationId)}`;
-  const r = await act(null, () => api("GET", base + "/hitl")); if (!r) return;
-  const fields = ((r.review || {}).fieldDetails) || [];
-  $("#hitl-body").innerHTML = fields.length ? `<div class="tbl"><table><tr><th>Field</th><th>Control file</th><th>On the NOTE</th><th>Matches?</th></tr>
-    ${fields.map((f, i) => `<tr><td><b>${esc(f.fieldName)}</b></td><td class="mono">${esc(f.metadataValue)}</td><td class="mono">${esc(f.extractedValue)}</td>
-      <td><label class="switch"><input type="checkbox" data-hf="${i}" ${f.isMatched !== false ? "checked" : ""}><span>match</span></label></td></tr>`).join("")}</table></div>`
-    : `<div class="empty">ACE returned no fields to review (HTTP ${r.httpStatus}).</div>`;
-  $("#hitl-send").onclick = e => act(e.currentTarget, () => api("POST", base + "/hitl", {fields: fields.map((f, i) => ({fieldName: f.fieldName, metadataValue: f.metadataValue,
-    extractedValue: f.extractedValue, isMatched: $(`[data-hf="${i}"]`).checked}))}), "Decision sent to ACE").then(x => { if (x) { $("#dlg-hitl").close(); pageJob(b.correlationId, currentTab()); } });
-  $("#dlg-hitl").showModal();
-}
 
 // ================================================================== callbacks and scenario runs
 let cbState = {filter: "", q: "", offset: 0};
@@ -1336,7 +1316,6 @@ $("#ace-reset").onclick = e => saveAce(e.currentTarget, "");
 $("#ace-cancel").onclick = () => $("#dlg-ace").close();
 $("#c-cancel").onclick = () => $("#dlg-close").close();
 $("#v-close").onclick = () => $("#dlg-view").close();
-$("#hitl-cancel").onclick = () => $("#dlg-hitl").close();
 $("#help").onclick = e => { e.preventDefault(); $("#dlg-help").showModal(); };
 $("#help-close").onclick = () => $("#dlg-help").close();
 
