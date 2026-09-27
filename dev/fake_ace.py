@@ -13,6 +13,12 @@ Faults, to check that the simulator reports them: put "simulate": "<fault>" in t
   status-mismatch     callback disagrees with Status    bad-response    Response.json breaks spec 6.4
   note-mismatch-passed  NOTE loan amount differs from the control file, validation still PASSED
   drop-document       the last submitted document is left out of Response.json
+  text-content-type   Status API and callback say Content-Type text/plain
+  fractional-time     timestamps with milliseconds (valid ISO 8601: must NOT be flagged)
+  status-regress      the Status API goes from COMPLETED back to IN_PROGRESS before the callback
+  bad-confidence      a confidence percentage for a page outside pageRange, another above 100
+  extra-response      a second *Response.json next to the first      odd-name  result file not named *Response.json
+A loanId starting with ACK200 is accepted with HTTP 200 instead of 202.
 """
 import io
 import json
@@ -43,14 +49,17 @@ s3 = boto3.client("s3", region_name=REGION)
 jobs, by_request, lock = {}, {}, threading.Lock()
 
 
-def ts():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def ts(job=None):
+    now = datetime.now(timezone.utc)
+    if job and job.get("fault") == "fractional-time":
+        return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def set_status(job, stage, state, code, value, description, batch_path="", failed=None):
     job["status"] = {"aceJobId": job["id"], "workflow": {"stage": stage, "state": state},
                      "status": {"code": code, "value": value, "description": description},
-                     "batchPath": batch_path, "failedDocuments": failed or [], "timestamp": ts()}
+                     "batchPath": batch_path, "failedDocuments": failed or [], "timestamp": ts(job)}
 
 
 def precheck(job):
@@ -117,7 +126,7 @@ def callback(job, override=None):
     key = str(uuid.uuid4())
     for attempt in range(8):
         req = urllib.request.Request(CALLBACK, data=body, method="POST", headers={
-            "Content-Type": "application/json", "Idempotency-Key": key, "x-amzn-lattice-identity": f"Principal={CALLER}; SessionName=fake"})
+            "Content-Type": "text/plain" if job.get("fault") == "text-content-type" else "application/json", "Idempotency-Key": key, "x-amzn-lattice-identity": f"Principal={CALLER}; SessionName=fake"})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 if r.status == 200:
@@ -142,7 +151,7 @@ def process(job):
         set_status(job, "EXTRACTION", "RUNNING", 4000, "IN_PROGRESS", "Extraction is currently in progress.")
         time.sleep(STEP)
         info = control["loanInfo"]
-        fault = info.get("simulate", "")
+        fault = job["fault"] = info.get("simulate", "")
         if fault == "processing-failure":
             set_status(job, "EXTRACTION", "FAILED", 3000, "PROCESSING_FAILED", "Extraction service returned an error (simulated).")
             return callback(job)
@@ -153,7 +162,7 @@ def process(job):
                                                                         "extractedValue": info.get("borrowerLastName"), "isMatched": True}]
             set_status(job, "EXTRACTION", "HITL_PENDING", 4000, "IN_PROGRESS", "Waiting for manual review.")
             job["decided"].wait()
-        name = f"{job['id']}/{job['loanId']}_Response.json"
+        name = f"{job['id']}/{job['loanId']}_Response.json" if fault != "odd-name" else f"{job['id']}/{job['loanId']}_result.json"
         if job.get("mismatched"):
             job["validation"] = "FAILED"
             desc = ", ".join({"loanAmount": "Loan Amount Mismatch", "sellerLoanNumber": "Seller Loan Number Mismatch"}.get(f, f"{f} Mismatch") for f in job["mismatched"]) + "."
@@ -170,6 +179,11 @@ def process(job):
             gone = list(job["pages"])[-1]
             doc["Documents"] = {k: [i for i in v if i["fileName"] != gone] for k, v in doc["Documents"].items()}
             doc["Documents"] = {k: v for k, v in doc["Documents"].items() if v}
+        if fault == "bad-confidence":
+            item = next(iter(doc["Documents"].values()))[0]
+            item["confidencePercentage"]["999"] = "95"
+        if fault == "extra-response":
+            s3.put_object(Bucket=OUTPUT, Key=f"{job['id']}/{job['loanId']}_old_Response.json", Body=b"{}", ContentType="application/json")
         if fault == "bad-response":
             doc["aceJobId"] = "ADR-SOMEONE-ELSE"
             next(iter(doc["Documents"].values()))[0]["pageRange"] = "pages one to three"
@@ -178,6 +192,11 @@ def process(job):
         set_status(job, "COMPLETED", "CLIENT_CALLBACK_PENDING", 0, "COMPLETED", "Processing completed successfully.", batch_path=name)
         if fault == "no-callback":
             return
+        if fault == "status-regress":  # terminal, then back to in progress, then terminal again before calling back
+            time.sleep(STEP * 4)
+            set_status(job, "EXTRACTION", "RUNNING", 4000, "IN_PROGRESS", "Extraction is currently in progress.")
+            time.sleep(STEP * 4)
+            set_status(job, "COMPLETED", "CLIENT_CALLBACK_PENDING", 0, "COMPLETED", "Processing completed successfully.", batch_path=name)
         override = None
         if fault == "bad-callback":
             override = lambda p: {**p, "status": {"code": "0", "value": "SUCCESS", "description": ""}, "timestamp": "27/09/2026 10:00", "output": {"batchPath": p["batchPath"]}}  # noqa: E731
@@ -186,6 +205,7 @@ def process(job):
             override = lambda p: {**p, "status": {"code": 0, "value": "COMPLETED", "description": "Processing completed successfully."}, "batchPath": name}  # noqa: E731
         if callback(job, override) and fault != "status-mismatch":
             set_status(job, "COMPLETED", "CLIENT_CALLBACK_DONE", 0, "COMPLETED", "Processing completed successfully.", batch_path=name)
+
     except Exception as exc:
         set_status(job, "PROCESSING", "FAILED", 3000, "PROCESSING_FAILED", f"Unexpected processing failure: {exc}")
         callback(job)
@@ -195,10 +215,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def reply(self, code, body):
+    def reply(self, code, body, content_type="application/json"):
         data = json.dumps(body).encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -217,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             return self.reply(200, {"aceJobId": m.group(1), "workflow": {}, "status": {"code": 4040, "value": "JOB_NOT_FOUND",
                                     "description": "No processing request found for the specified aceJobId."}, "batchPath": "", "failedDocuments": [], "timestamp": ts()})
-        self.reply(200, job["status"])
+        self.reply(200, job["status"], "text/plain" if job.get("fault") == "text-content-type" else "application/json")
 
     def do_POST(self):
         b = self.body()
@@ -239,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
                     jobs[job["id"]] = job
                     by_request[(loan, cid)] = job["id"]
                     threading.Thread(target=process, args=(job,), daemon=True).start()
-            return self.reply(202, {"aceJobId": job["id"], "status": {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}})
+            return self.reply(200 if str(loan).startswith("ACK200") else 202, {"aceJobId": job["id"], "status": {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}})
         job = jobs.get(b.get("adr"))
         if self.path == "/validate/reviewValidation" and job and job.get("review"):
             return self.reply(200, {"clientLoanNumber": job["loanId"], "adr": job["id"], "fieldDetails": job["review"],

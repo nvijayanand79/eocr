@@ -607,12 +607,18 @@ function recordsCard(b) {
 }
 
 function checksCard(b) {
-  const cbErrs = (b.callback || {}).contractErrors || [], resErrs = (b.result || {}).errors || [];
-  const all = [...new Set([...(b.contractErrors || []), ...cbErrs, ...resErrs])];
-  const done = b.state === "CLOSED";
-  return `<div class="card"><h3>Spec compliance ${all.length ? chip(`${all.length} deviations`, "s-bad") : done ? chip("all passed", "s-ok") : chip("so far ok", "s-idle")}</h3>
-    <p class="hint">Every ACE answer checked against the integration spec: acceptance (4.2), status (7.3), callback (5.1/6.x), callback vs status, result file (6.4/6.5).</p>
-    ${all.length ? `<ul class="errs">${all.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : `<p class="okline">No contract deviations seen${done ? "" : " yet"}.</p>`}
+  const rows = b.specChecklist || [];
+  const failed = rows.filter(r => r.result === "failed"), devs = failed.reduce((n, r) => n + r.errors.length, 0);
+  const passed = rows.filter(r => r.result === "passed").length;
+  const res = r => r.result === "passed" ? chip("passed", "s-ok") : r.result === "failed" ? chip(`failed · ${r.errors.length}`, "s-bad")
+    : r.result === "pending" ? chip(r.note || "pending", "s-idle") : `<span class="hint" style="margin:0">n/a</span>`;
+  return `<div class="card wide"><h3>Spec compliance ${devs ? chip(`${devs} deviation${devs > 1 ? "s" : ""}`, "s-bad") : b.state === "CLOSED" ? chip("all checks passed", "s-ok") : chip("so far ok", "s-idle")}
+      <span style="font-weight:400;color:var(--muted);font-size:12.5px">${passed} of ${rows.filter(r => r.result !== "n/a").length} applicable checks passed</span></h3>
+    <p class="hint">Each clause of the ACE to eOCR Integration Specification v1.1 this execution touches. 3.1 and 3.2 are eOCR's side (the package you staged); the rest is what ACE sent back.</p>
+    <div style="overflow-x:auto"><table><tr><th style="width:120px">spec</th><th>check</th><th style="width:170px">result</th></tr>
+      ${rows.map(r => `<tr><td class="mono">${esc(r.clause)}</td><td>${esc(r.check)}
+        ${r.errors.length ? `<ul class="errs" style="margin:6px 0 0;padding-left:18px">${r.errors.map(e => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</td><td>${res(r)}</td></tr>`).join("")}
+    </table></div>
   </div>`;
 }
 

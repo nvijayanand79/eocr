@@ -132,6 +132,32 @@ Each execution's Tracking tab has a **Validation** section:
 
 The view is frozen on the execution and in `outcome.json` when it closes.
 
+### Spec coverage (ACE to eOCR Integration Specification v1.1)
+
+Each execution's **Spec compliance** card is a checklist of these clauses (passed / failed with the deviations / not
+applicable / pending), and the same checklist is frozen into `outcome.json`.
+
+| Spec | What the simulator does and checks |
+|---|---|
+| 3.1 Source S3 structure | stages `loanId=<loanId>/correlationId=<execution>/<control>.json` + documents; several executions per loan |
+| 3.2 Control file | writes it; checks loanInfo has loanId, correlationId, sellerLoanNumber, loanAmount, borrowerLastName (non-empty, ids matching the folder), `extractionRequired` is the string `"true"`/`"false"`, every document has fileName + contentType, is in the folder with that content type, and nothing unlisted is in the folder |
+| 3.3 Staging rules 1-7 | onboarding, async processing, status, result file, callback, then step 7: eOCR validates the callback and retrieves the result when batchPath is set |
+| 4, 4.1 Onboarding | `POST /integration/loan/onboarding` with loanId, correlationId, batchPath (control file or folder); malformed requests in `api-contract` |
+| 4.2 Acknowledgement | HTTP 202, `application/json`, exactly `{aceJobId, status {202, ACCEPTED, "Request accepted for processing."}}`; a 2xx other than 202 with an aceJobId is still tracked and reported |
+| 5 Callback endpoint | `POST /eocr/callback`, `application/json`, aceJobId of a job eOCR submitted (unknown jobs are shown), terminal values only |
+| 5.1, 5.2 Callback payload | exactly the five flat fields, numeric code matching value, non-empty description, ISO 8601 UTC timestamp (fractions and `+00:00` allowed), failedDocuments items `{documentName, reason}` |
+| 6.1-6.3 Per-status payloads, status mapping | batchPath `<aceJobId>/<name>Response.json` for 0 and 2000, empty otherwise; failedDocuments populated only for 1000 |
+| 6.4 *Response.json | one per batch, top-level fields and order, `extractionRequired` as sent, `validationStatus` PASSED/FAILED/NA and as the outcome implies, Documents items and their field order, fileName of a submitted document, pageRange syntax, confidencePercentage keyed by pages inside pageRange with 0-100 values, extraction `{Value, cr}`, fileSize a byte count |
+| 6.5 VALIDATION_FAILED | same schema, validationStatus FAILED, extraction empty; plus the NOTE validation view (control file vs NOTE vs ACE vs HITL) |
+| 7.1-7.4 Status API | `GET /integration/loan/status/{aceJobId}` with `Accept: application/json`; response `application/json`, exact fields, workflow stage/state, code/value, output rules, timestamp; 4040 with `workflow {}` for unknown jobs |
+| 7 Status progression | never back from a terminal status, never a different terminal outcome, never 4040 for an accepted job |
+| 5 vs 7 | callback status, batchPath and failedDocuments equal the Status API's |
+| Consistency rule | status.code and status.value must match, everywhere |
+
+Not checked, because the spec does not define it: the aceJobId format, authentication (IAM here), onboarding error
+bodies, the separator in the top-level `fileName` ("concatenated"), what `fileSize` counts, the format of `cr`, and
+whether pageRange stays within each PDF's page count.
+
 ### How problems are reported
 
 | Problem | What the console shows |

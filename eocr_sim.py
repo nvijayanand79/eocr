@@ -48,7 +48,24 @@ CONSOLE_HOST = os.environ.get("SIM_CONSOLE_HOST", "127.0.0.1")   # loopback: rea
 STATUS = {0: "COMPLETED", 1000: "PRECHECK_FAILED", 2000: "VALIDATION_FAILED", 3000: "PROCESSING_FAILED",
           4000: "IN_PROGRESS", 202: "ACCEPTED", 4040: "JOB_NOT_FOUND"}
 TERMINAL = {0, 1000, 2000, 3000}
-TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|\+00:00)$")  # ISO 8601, UTC (spec 5.1)
+
+
+def is_utc_timestamp(value):
+    if not TIMESTAMP.match(str(value or "")):
+        return False
+    try:
+        datetime.fromisoformat(re.sub(r"(\.\d{1,6})\d*", r"\1", str(value)).replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
+def json_content_type(value, where):
+    """Spec 4, 5 and 7: every body is application/json."""
+    if not str(value or "").lower().split(";")[0].strip() == "application/json":
+        return [f"{where}: Content-Type is {value!r}, not application/json"]
+    return []
 
 s3 = boto3.client("s3", region_name=REGION)
 _session = boto3.Session(region_name=REGION)
@@ -64,7 +81,7 @@ def check_status_object(status, where):
     errs = []
     if not isinstance(status, dict) or set(status) != {"code", "value", "description"}:
         return [f"{where}: status must be exactly {{code, value, description}}: {status}"]
-    if not isinstance(status["code"], int):
+    if not isinstance(status["code"], int) or isinstance(status["code"], bool):
         errs.append(f"{where}: status.code must be a number, got {type(status['code']).__name__}")
     elif STATUS.get(status["code"]) != status["value"]:
         errs.append(f"{where}: status.code {status['code']} does not match status.value {status['value']}")
@@ -80,6 +97,8 @@ def check_output_rules(code, job_id, batch_path, failed, where):
     if code in (0, 2000):
         if not re.fullmatch(re.escape(job_id) + r"/[^/]+\.json", batch_path or ""):
             errs.append(f"{where}: {STATUS[code]} needs batchPath '<aceJobId>/<file>.json', got '{batch_path}'")
+        elif not str(batch_path).endswith("Response.json"):
+            errs.append(f"{where}: result file '{batch_path}' is not named *Response.json (spec 6.4)")
     elif batch_path != "":
         errs.append(f"{where}: {STATUS.get(code)} needs an empty batchPath, got '{batch_path}'")
     if not isinstance(failed, list):
@@ -107,8 +126,8 @@ def check_callback(payload):
     if code not in TERMINAL:
         errs.append(f"callback: status.code {code} is not terminal")
     errs += check_output_rules(code, payload.get("aceJobId", ""), payload.get("batchPath"), payload.get("failedDocuments"), "callback")
-    if not TIMESTAMP.match(str(payload.get("timestamp", ""))):
-        errs.append(f"callback: timestamp '{payload.get('timestamp')}' is not ISO-8601 UTC (yyyy-MM-ddTHH:mm:ssZ)")
+    if not is_utc_timestamp(payload.get("timestamp")):
+        errs.append(f"callback: timestamp '{payload.get('timestamp')}' is not an ISO 8601 UTC time (e.g. 2026-09-11T07:53:00Z)")
     return errs
 
 
@@ -125,9 +144,19 @@ def check_status_response(body, job_id):
     errs += check_output_rules(code, job_id, body.get("batchPath"), body.get("failedDocuments"), "status API")
     if code != 4040 and not {"stage", "state"} <= set(body.get("workflow") or {}):
         errs.append(f"status API: workflow must have stage and state: {body.get('workflow')}")
-    if not TIMESTAMP.match(str(body.get("timestamp", ""))):
-        errs.append(f"status API: timestamp '{body.get('timestamp')}' is not ISO-8601 UTC")
+    if not is_utc_timestamp(body.get("timestamp")):
+        errs.append(f"status API: timestamp '{body.get('timestamp')}' is not an ISO 8601 UTC time")
     return errs
+
+
+def _pages(page_range):
+    pages = set()
+    for part in str(page_range or "").split(","):
+        m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", part)
+        if not m:
+            return set()
+        pages.update(range(int(m.group(1)), int(m.group(2) or m.group(1)) + 1))
+    return pages
 
 
 def check_response_file(doc, job_id, extraction_required, file_names, expect_validation, min_types=3):
@@ -139,8 +168,17 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
         errs.append(f"Response.json top-level keys {list(doc)} != {order}")
     if doc.get("aceJobId") != job_id:
         errs.append("Response.json aceJobId mismatch")
-    if doc.get("extractionRequired") != ("true" if extraction_required else "false"):
-        errs.append(f"Response.json extractionRequired {doc.get('extractionRequired')!r} != {extraction_required}")
+    if isinstance(extraction_required, str):  # the control file's own value, as sent
+        sent = extraction_required
+        extraction_required = {"true": True, "false": False}.get(sent)  # None: the control file sent neither, no extraction rule applies
+    else:
+        sent = "true" if extraction_required else "false"
+    if doc.get("extractionRequired") not in ("true", "false"):
+        errs.append(f"Response.json extractionRequired {doc.get('extractionRequired')!r} is not \"true\" or \"false\"")
+    elif sent in ("true", "false") and doc.get("extractionRequired") != sent:
+        errs.append(f"Response.json extractionRequired {doc.get('extractionRequired')!r} but the control file sent {sent!r}")
+    if doc.get("validationStatus") not in ("PASSED", "FAILED", "NA"):
+        errs.append(f"Response.json validationStatus {doc.get('validationStatus')!r} is not PASSED, FAILED or NA")
     allowed = expect_validation if isinstance(expect_validation, tuple) else (expect_validation,)
     if expect_validation is not None and doc.get("validationStatus") not in allowed:
         errs.append(f"Response.json validationStatus {doc.get('validationStatus')} != {expect_validation}")
@@ -164,6 +202,19 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
                 errs.append(f"Documents['{doc_type}'] pageRange '{item['pageRange']}' is malformed")
             if not isinstance(item["confidencePercentage"], dict):
                 errs.append(f"Documents['{doc_type}'] confidencePercentage must be an object")
+            else:
+                pages = _pages(item["pageRange"])
+                for page, pct in item["confidencePercentage"].items():
+                    if not str(page).isdigit() or (pages and int(page) not in pages):
+                        errs.append(f"Documents['{doc_type}'] confidencePercentage page {page!r} is outside pageRange '{item['pageRange']}'")
+                        break
+                    try:
+                        ok = 0 <= float(str(pct).rstrip("%")) <= 100
+                    except ValueError:
+                        ok = False
+                    if not ok:
+                        errs.append(f"Documents['{doc_type}'] confidencePercentage {pct!r} for page {page} is not a percentage")
+                        break
             if not isinstance(item["extraction"], dict):
                 errs.append(f"Documents['{doc_type}'] extraction must be an object")
                 continue
@@ -172,10 +223,10 @@ def check_response_file(doc, job_id, extraction_required, file_names, expect_val
                 extracted_types.add(doc_type)
                 if not isinstance(field, dict) or list(field) != ["Value", "cr"]:
                     errs.append(f"Documents['{doc_type}'].extraction['{name}'] must be {{Value, cr}}: {field}")
-    if (not extraction_required or expect_validation == "FAILED") and extracted:
+    if (extraction_required is False or expect_validation == "FAILED") and extracted:
         errs.append(f"Response.json has {extracted} extracted fields although extraction must be empty")
     # full extraction, not just the NOTE extracted for validation: several document types carry fields
-    if extraction_required and expect_validation != "FAILED" and len(extracted_types) < min_types:
+    if extraction_required is True and expect_validation != "FAILED" and len(extracted_types) < min_types:
         errs.append(f"Response.json has extracted fields in only {sorted(extracted_types)} although whole-package extraction was required")
     if not str(doc.get("fileSize", "")).isdigit():
         errs.append(f"Response.json fileSize {doc.get('fileSize')!r} is not a byte count")
@@ -290,6 +341,55 @@ def validation_view(batch):
     return {"validationStatus": status, "ran": ran, "stoppedAt": None if ran or code is None else outcome.get("value") or st.get("value"),
             "description": description, "fields": fields, "documents": documents, "findings": findings,
             "hitlUsed": bool(hitl), "complete": batch.get("state") == "CLOSED"}
+
+
+# ------------------------------------------------------------------ spec checklist: every clause, passed / failed / not applicable
+
+def spec_checklist(batch):
+    """One row per clause of the integration spec that an execution exercises, with the deviations found for it."""
+    cb = batch.get("callback") or {}
+    result = batch.get("result") or {}
+    outcome = batch.get("outcome") or {}
+    status_errs = list(batch.get("contractErrors") or [])
+    cb_errs = list(cb.get("contractErrors") or [])
+    res_errs = list(result.get("errors") or [])
+    closed, submitted = batch["state"] == "CLOSED", bool(batch.get("aceJobId"))
+    finished = outcome.get("value") not in (None, "ABANDONED")
+
+    def pick(errs, *prefixes, exclude=()):
+        return [e for e in errs if e.lower().startswith(prefixes) and not e.lower().startswith(exclude)]
+
+    def row(clause, title, applies, errors, done=True, pending_text="not yet"):
+        state = "n/a" if not applies else "failed" if errors else "passed" if done else "pending"
+        return {"clause": clause, "check": title, "result": state, "errors": errors, "note": pending_text if state == "pending" else None}
+
+    staged = batch["state"] not in ("DRAFT",)
+    rows = [
+        row("3.1", "Package staged as loanId=<loanId>/correlationId=<execution>/ with the control file and documents", staged, [], staged),
+        row("3.2", "Control file: loanInfo (loanId, correlationId, sellerLoanNumber, loanAmount, borrowerLastName), extractionRequired \"true\"/\"false\", documents with fileName and contentType",
+            staged, list(batch.get("controlIssues") or []), staged),
+        row("4, 4.2", "Onboarding accepted: HTTP 202, application/json, exactly {aceJobId, status 202 ACCEPTED}", batch["state"] not in ("DRAFT", "STAGED"),
+            pick(status_errs, "onboarding") + ([f"ACE refused the request: {(e.get('message') or '')}; response {((e.get('data') or {}).get('response'))}"
+                                                for e in (batch.get("events") or []) if e.get("type") == "rejected"][-1:] if batch["state"] == "REJECTED" else []),
+            submitted or batch["state"] == "REJECTED"),
+        row("7.1-7.4, mapping", "Status API: exact fields, workflow stage/state, numeric code matching value, batchPath / failedDocuments per code, ISO 8601 UTC timestamp, application/json",
+            submitted, pick(status_errs, "status api"), bool(batch.get("stages"))),
+        row("7", "Status progresses without going back or changing a terminal outcome, and knows the job", submitted, pick(status_errs, "status progression"), closed),
+        row("5", "Terminal callback delivered to the eOCR endpoint", submitted and finished or (submitted and not closed),
+            [] if cb or not closed else [f"no callback received; closed by {batch.get('closedBy')}"], bool(cb), "waiting for ACE"),
+        row("5.1, 5.2, 6.1-6.3", "Callback payload: flat fields, numeric terminal code matching value, batchPath / failedDocuments rules, ISO 8601 UTC timestamp, application/json",
+            bool(cb) or (submitted and not closed), pick(cb_errs, "callback"), bool(cb), "waiting for ACE"),
+        row("5, 7", "Callback agrees with the Status API (status, batchPath, failedDocuments)", bool(cb), pick(status_errs, "callback differs"), bool(cb)),
+        row("3.3 step 7, 6.4, 6.5", "*Response.json retrieved: one per batch, exact schema, Documents items, pageRange and confidence by page, extraction rules, validationStatus",
+            bool(outcome.get("batchPath")) or (submitted and not closed), res_errs, bool(result.get("key")), "written on COMPLETED / VALIDATION_FAILED"),
+        row("6.3, 6.5, 3.2", "NOTE validation and document results consistent with the control file and the package",
+            closed and finished, list((batch.get("validation") or {}).get("findings") or []), closed),
+    ]
+    covered = {e for r in rows for e in r["errors"]}
+    other = [e for e in status_errs + cb_errs + res_errs if e not in covered]
+    if other:
+        rows.append(row("other", "Other deviations", True, other))
+    return rows
 
 
 # ------------------------------------------------------------------ batch ledger (eOCR's record of each execution)
@@ -502,6 +602,45 @@ def callback_records(job_id):
     return [json.loads(s3.get_object(Bucket=INTAKE_BUCKET, Key=k)["Body"].read()) for k in keys]
 
 
+CONTROL_LOAN_FIELDS = ("loanId", "correlationId", "sellerLoanNumber", "loanAmount", "borrowerLastName")
+
+
+def control_file_issues(control, batch, present=None):
+    """Spec 3.1/3.2 as eOCR must produce it. present: {fileName: contentType} of the objects in the folder."""
+    issues = []
+    if not isinstance(control, dict):
+        return ["control file is not a JSON object"]
+    missing = [k for k in ("loanInfo", "extractionRequired", "documents") if k not in control]
+    if missing:
+        issues.append(f"control file lacks {missing}")
+    info = control.get("loanInfo") if isinstance(control.get("loanInfo"), dict) else {}
+    empty = [k for k in CONTROL_LOAN_FIELDS if not str(info.get(k) or "").strip()]
+    if empty:
+        issues.append(f"loanInfo is missing or empty: {empty}")
+    if info.get("loanId") not in (None, "") and info.get("loanId") != batch["loanId"]:
+        issues.append(f"loanInfo.loanId {info.get('loanId')!r} differs from the folder's loanId {batch['loanId']!r}")
+    if info.get("correlationId") not in (None, "") and info.get("correlationId") != batch["correlationId"]:
+        issues.append(f"loanInfo.correlationId {info.get('correlationId')!r} differs from the folder's correlationId {batch['correlationId']!r}")
+    if control.get("extractionRequired") not in ("true", "false"):
+        issues.append(f"extractionRequired is {control.get('extractionRequired')!r}; spec 3.2 wants the string \"true\" or \"false\"")
+    docs = control.get("documents")
+    if not isinstance(docs, list) or not docs:
+        issues.append("documents lists no documents")
+    else:
+        for d in docs:
+            if not isinstance(d, dict) or not d.get("fileName") or not d.get("contentType"):
+                issues.append(f"documents entry needs fileName and contentType: {d}")
+            elif present is not None and d["fileName"] not in present:
+                issues.append(f"{d['fileName']} is listed but not in the folder")
+            elif present is not None and present[d["fileName"]] and present[d["fileName"]].split(";")[0] != d["contentType"]:
+                issues.append(f"{d['fileName']}: contentType {d['contentType']!r} differs from the uploaded object's {present[d['fileName']]!r}")
+        if present is not None:
+            extra = sorted(set(present) - {d.get("fileName") for d in docs if isinstance(d, dict)} - {batch.get("controlFileName")})
+            if extra:
+                issues.append(f"in the folder but not listed in the control file: {extra}")
+    return issues
+
+
 def build_control_file(batch):
     if batch.get("controlOverride") is not None:
         return batch["controlOverride"]
@@ -521,8 +660,15 @@ def retrieve_result(batch, code, batch_path):
     except Exception as exc:
         return {"ok": False, "key": f"s3://{OUTPUT_BUCKET}/{batch_path}", "errors": [f"cannot read Response.json: {type(exc).__name__}: {exc}"], "summary": None}
     expect = "FAILED" if code == 2000 else ("PASSED", "NA") if code == 0 else None
-    errs = check_response_file(doc, batch["aceJobId"], batch["extractionRequired"], {d["fileName"] for d in batch["documents"]}, expect, min_types=0) \
+    sent = (batch.get("controlFile") or {}).get("extractionRequired") if isinstance(batch.get("controlFile"), dict) else None
+    errs = check_response_file(doc, batch["aceJobId"], sent if isinstance(sent, str) else batch["extractionRequired"], {d["fileName"] for d in batch["documents"]}, expect, min_types=0) \
         if isinstance(doc, dict) else ["Response.json is not a JSON object"]
+    try:
+        files = [o["Key"] for o in s3.list_objects_v2(Bucket=OUTPUT_BUCKET, Prefix=f"{batch['aceJobId']}/").get("Contents", []) if o["Key"].endswith("Response.json")]
+        if len(files) > 1:
+            errs.append(f"Response.json: {len(files)} result files for one batch, spec 6.4 says one: {files}")
+    except Exception as exc:
+        log("output listing failed", aceJobId=batch.get("aceJobId"), error=str(exc))
     return {"ok": not errs, "key": f"s3://{OUTPUT_BUCKET}/{batch_path}", "errors": errs, "summary": response_summary(doc) if isinstance(doc, dict) else None}
 
 
@@ -623,6 +769,7 @@ def store_outcome(cid):
               "callbackAccepted": batch.get("callback"), "callbackAttempts": callback_records(batch["aceJobId"]) if batch.get("aceJobId") else [],
               "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
               "validation": batch.get("validation"), "hitl": batch.get("hitl"),
+              "specChecklist": spec_checklist(batch),
               "responseFileCopy": f"s3://{INTAKE_BUCKET}/{copy}" if copy else None,
               "contractErrors": sorted(set(batch.get("contractErrors") or []) | set((batch.get("callback") or {}).get("contractErrors") or [])
                                        | set((batch.get("result") or {}).get("errors") or []))}
@@ -650,9 +797,20 @@ def read_record(cid, name):
         raise KeyError(name) from None
 
 
-def record_status(batch, body, source="tracker"):
+def record_status(batch, body, source="tracker", content_type=None):
     """Fold one Status API response into the execution: stage transitions, contract errors, terminal notice."""
-    for e in check_status_response(body, batch["aceJobId"]):
+    errs = check_status_response(body, batch["aceJobId"])
+    if content_type is not None:
+        errs += json_content_type(content_type, "status API")
+    prev = ((batch.get("status") or {}).get("status") or {}).get("code")
+    new = (body.get("status") or {}).get("code")
+    if new == 4040 and batch.get("aceJobId"):
+        errs.append(f"status progression: the Status API reports 4040 JOB_NOT_FOUND for {batch['aceJobId']}, which ACE accepted")
+    elif prev in TERMINAL and new not in TERMINAL:
+        errs.append(f"status progression: went back from terminal {prev} {STATUS.get(prev)} to {new} {STATUS.get(new)}")
+    elif prev in TERMINAL and new in TERMINAL and new != prev:
+        errs.append(f"status progression: terminal outcome changed from {prev} {STATUS.get(prev)} to {new} {STATUS.get(new)}")
+    for e in errs:
         if e not in batch["contractErrors"]:
             batch["contractErrors"].append(e)
             add_event(batch, "contract-error", e)
@@ -680,10 +838,11 @@ def refresh_status(cid, source="tracker"):
         raise KeyError(cid)
     if not batch.get("aceJobId"):
         raise Conflict("execution has no aceJobId yet")
-    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"))
+    meta = {}
+    code, body = call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta)
     if code != 200 or not isinstance(body, dict):
         return update_batch(cid, lambda b: add_event(b, "error", f"Status API -> HTTP {code}", body=body))
-    return update_batch(cid, lambda b: record_status(b, body, source))
+    return update_batch(cid, lambda b: record_status(b, body, source, meta.get("contentType")))
 
 
 def on_callback(job_id, record):
@@ -715,14 +874,16 @@ def on_callback(job_id, record):
     if closed_already:
         return
     result = retrieve_result(batch, st.get("code"), p.get("batchPath"))
+    meta = {}
     try:  # eOCR validates the callback against the Status API before closing
-        code, body = call("GET", f"/integration/loan/status/{job_id}", base=batch.get("aceUrl"))
+        meta = {}
+        code, body = call("GET", f"/integration/loan/status/{job_id}", base=batch.get("aceUrl"), meta=meta)
     except Exception as exc:
         code, body = None, f"{type(exc).__name__}: {exc}"
 
     def close(b):
         if isinstance(body, dict) and code == 200:
-            record_status(b, body, "callback reconciliation")
+            record_status(b, body, "callback reconciliation", meta.get("contentType"))
             diff = [f for f in ("status", "batchPath", "failedDocuments") if body.get(f) != p.get(f)]
             if diff:
                 msg = "callback differs from Status API in " + ", ".join(f"{f} (callback {p.get(f)!r}, Status API {body.get(f)!r})" for f in diff)
@@ -797,7 +958,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 "callerPrincipal": principal.group(1) if principal else None,
                 "idempotencyKey": self.headers.get("Idempotency-Key"),
                 "headers": {k: v for k, v in self.headers.items() if k.lower() not in ("authorization", "x-amz-security-token", "cookie")},
-                "contractErrors": check_callback(payload),
+                "contractErrors": check_callback(payload) + json_content_type(self.headers.get("Content-Type"), "callback"),
                 "payload": payload,
             }
             try:
@@ -833,8 +994,8 @@ def serve():
 
 # ------------------------------------------------------------------ ACE API client (SigV4 over VPC Lattice)
 
-def call(method, path, body=None, expect=None, base=None):
-    """base: the ACE integration endpoint to call (default ACE_URL_INTEGRATION)."""
+def call(method, path, body=None, expect=None, base=None, meta=None):
+    """base: the ACE integration endpoint to call (default ACE_URL_INTEGRATION). meta, a dict, receives the response's contentType."""
     url = (base or INTEGRATION_URL).rstrip("/") + path
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Accept": "application/json", "x-amz-content-sha256": "UNSIGNED-PAYLOAD"}
@@ -845,9 +1006,11 @@ def call(method, path, body=None, expect=None, base=None):
     http = urllib.request.Request(url, data=data, method=method, headers=dict(req.headers.items()))
     try:
         with urllib.request.urlopen(http, timeout=60) as r:
-            code, text = r.status, r.read().decode()
+            code, text, ctype = r.status, r.read().decode(), r.headers.get("Content-Type")
     except urllib.error.HTTPError as e:
-        code, text = e.code, e.read().decode(errors="replace")
+        code, text, ctype = e.code, e.read().decode(errors="replace"), e.headers.get("Content-Type")
+    if meta is not None:
+        meta["contentType"] = ctype
     try:
         parsed = json.loads(text) if text else None
     except ValueError:

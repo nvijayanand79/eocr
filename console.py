@@ -198,17 +198,17 @@ def stage(cid):
     control = sim.build_control_file(batch)
     s3.put_object(Bucket=INTAKE_BUCKET, Key=batch["folder"] + batch["controlFileName"], Body=json.dumps(control, indent=2).encode(), ContentType="application/json")
     present = {o["Key"][len(batch["folder"]):] for o in s3.list_objects_v2(Bucket=INTAKE_BUCKET, Prefix=batch["folder"]).get("Contents", [])}
-    listed = [d.get("fileName") for d in control.get("documents", []) if isinstance(d, dict)]
-    missing = [n for n in listed if n not in present]
+    types = {d["fileName"]: d["contentType"] for d in batch["documents"]}
+    issues = sim.control_file_issues(control, batch, {n: types.get(n) for n in present})
+    listed = [d.get("fileName") for d in control.get("documents", []) if isinstance(d, dict)] if isinstance(control, dict) else []
 
     def change(b):
         editable(b)
         b.update(state="STAGED", controlFile=control)
         add_event(b, "staged", f"control file written to s3://{INTAKE_BUCKET}/{b['folder']}{b['controlFileName']} listing {len(listed)} documents", controlFile=control)
-        if missing:
-            add_event(b, "warning", f"control file lists documents that are not in the folder: {missing}")
-        if not listed:
-            add_event(b, "warning", "control file lists no documents")
+        b["controlIssues"] = issues
+        for i in issues:
+            add_event(b, "warning", f"control file (spec 3.2): {i}")
     return update_batch(cid, change)
 
 
@@ -222,28 +222,38 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
         raise Conflict(f"execution is {batch['state']}; write the control file first" if batch["state"] == "DRAFT" else f"execution is already {batch['state']}")
     batch_path = batch["folder"] if batch_path_mode == "folder" else batch["folder"] + batch["controlFileName"]
     request = {"loanId": batch["loanId"], "correlationId": batch["correlationId"], "batchPath": batch_path}
-    code, resp = sim.call("POST", "/integration/loan/onboarding", request, base=ace_url)
+    meta = {}
+    code, resp = sim.call("POST", "/integration/loan/onboarding", request, base=ace_url, meta=meta)
     job = resp.get("aceJobId") if isinstance(resp, dict) else None
-    if code == 202 and job:
+    accepted = 200 <= code < 300 and bool(job)  # accepted even when the HTTP code is wrong: the job exists and must be tracked
+    if accepted:
         flaky = max(0, min(int(flaky or 0), 10))
         if flaky:
             s3.put_object(Bucket=INTAKE_BUCKET, Key=f"{SIM_PREFIX}flaky/{job}", Body=json.dumps({"refuse": flaky}).encode())
         sim.index_job(job, cid)
-    ack_ok = isinstance(resp, dict) and set(resp) == {"aceJobId", "status"} and \
-        resp.get("status") == {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}
+    ack_errors = []
+    if 200 <= code < 300:
+        if code != 202:
+            ack_errors.append(f"onboarding acknowledgement: HTTP {code}, spec 4 requires 202 Accepted")
+        if not (isinstance(resp, dict) and set(resp) == {"aceJobId", "status"} and
+                resp.get("status") == {"code": 202, "value": "ACCEPTED", "description": "Request accepted for processing."}):
+            ack_errors.append(f"onboarding acknowledgement does not match spec 4.2: {resp}")
+        if not job:
+            ack_errors.append("onboarding acknowledgement carries no aceJobId")
+        ack_errors += sim.json_content_type(meta.get("contentType"), "onboarding acknowledgement")
 
     def change(b):
         b["batchPath"] = batch_path
         b["aceUrl"] = ace_url
-        if code == 202 and job:
+        if accepted:
             b.update(state="SUBMITTED", aceJobId=job, flaky=flaky, submittedAt=now_iso(), submittedBy=sim.operator())
-            add_event(b, "submitted", f"onboarding at {ace_url} -> HTTP 202, aceJobId {job}" + (f"; callback endpoint will refuse the first {flaky} deliveries" if flaky else ""),
+            add_event(b, "submitted", f"onboarding at {ace_url} -> HTTP {code}, aceJobId {job}" + (f"; callback endpoint will refuse the first {flaky} deliveries" if flaky else ""),
                       request=request, response=resp)
-            if not ack_ok:
-                msg = f"onboarding acknowledgement does not match spec 4.2: {resp}"
+        for msg in ack_errors:
+            if msg not in b["contractErrors"]:
                 b["contractErrors"].append(msg)
-                add_event(b, "contract-error", msg)
-        else:
+            add_event(b, "contract-error", msg)
+        if not accepted:
             b.update(state="REJECTED", submittedAt=now_iso(), submittedBy=sim.operator())
             add_event(b, "rejected", f"onboarding at {ace_url} -> HTTP {code}", request=request, response=resp)
     update_batch(cid, change)
@@ -284,7 +294,8 @@ def close(cid, note=""):
         raise Conflict("execution is already closed")
     body = None
     if batch.get("aceJobId"):
-        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"))
+        meta = {}
+        code, body = sim.call("GET", f"/integration/loan/status/{batch['aceJobId']}", base=batch.get("aceUrl"), meta=meta)
         body = body if code == 200 and isinstance(body, dict) else None
     st = (body or {}).get("status") or {}
     terminal = st.get("code") in sim.TERMINAL
@@ -294,7 +305,7 @@ def close(cid, note=""):
         if b["state"] == "CLOSED":
             raise Conflict("execution was closed meanwhile (probably by its callback)")
         if body:
-            sim.record_status(b, body, "close")
+            sim.record_status(b, body, "close", meta.get("contentType"))
         by = "reconciliation" if terminal else "manual"
         b.update(state="CLOSED", closedAt=now_iso(), closedBy=by, closedByUser=sim.operator())
         if terminal:
@@ -339,6 +350,7 @@ def detail(cid):
     batch["records"] = sim.list_records(cid)
     if batch["state"] != "CLOSED" or not batch.get("validation"):
         batch["validation"] = sim.validation_view(batch)  # live view while open; frozen at close
+    batch["specChecklist"] = sim.spec_checklist(batch)
     batch["s3"] = {"intake": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "output": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None}
     return batch
 
