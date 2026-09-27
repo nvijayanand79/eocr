@@ -1,4 +1,4 @@
-"""Creates the local buckets and a synthetic test loan (loan.json + a 200-page PDF) for dev/run_local.sh."""
+"""Creates the local buckets and a synthetic test loan (loan.json + a 260-page PDF (room for every scenario slice around the NOTE)) for dev/run_local.sh."""
 import io
 import json
 import os
@@ -14,7 +14,7 @@ for bucket in (os.environ["ACE_BUCKET_INTAKE"], os.environ["ACE_BUCKET_OUTPUT"],
         pass
 
 w = PdfWriter()
-for _ in range(200):
+for _ in range(260):
     w.add_blank_page(width=612, height=792)
 buf = io.BytesIO()
 w.write(buf)

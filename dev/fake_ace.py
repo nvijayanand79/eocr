@@ -11,6 +11,8 @@ Faults, to check that the simulator reports them: put "simulate": "<fault>" in t
   processing-failure  3000 PROCESSING_FAILED            no-callback     finishes, never calls back
   bad-callback        callback breaks the contract      missing-response  callback names a file that was never written
   status-mismatch     callback disagrees with Status    bad-response    Response.json breaks spec 6.4
+  note-mismatch-passed  NOTE loan amount differs from the control file, validation still PASSED
+  drop-document       the last submitted document is left out of Response.json
 """
 import io
 import json
@@ -160,6 +162,14 @@ def process(job):
             return callback(job)
         extraction = control.get("extractionRequired") == "true"
         doc = response_file(job, control, extraction)
+        if fault == "note-mismatch-passed":
+            for item in doc["Documents"].get("NOTE", []):
+                if "loanAmount" in item["extraction"]:
+                    item["extraction"]["loanAmount"]["Value"] = "199999.00"
+        if fault == "drop-document" and len(job["pages"]) > 1:
+            gone = list(job["pages"])[-1]
+            doc["Documents"] = {k: [i for i in v if i["fileName"] != gone] for k, v in doc["Documents"].items()}
+            doc["Documents"] = {k: v for k, v in doc["Documents"].items() if v}
         if fault == "bad-response":
             doc["aceJobId"] = "ADR-SOMEONE-ELSE"
             next(iter(doc["Documents"].values()))[0]["pageRange"] = "pages one to three"

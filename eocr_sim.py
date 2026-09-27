@@ -199,6 +199,99 @@ def response_summary(doc):
     }
 
 
+# ------------------------------------------------------------------ NOTE and document validation, as eOCR sees it
+
+FIELD_LABELS = {"loanAmount": "Loan Amount", "sellerLoanNumber": "Seller Loan Number", "borrowerLastName": "Borrower Last Name"}
+
+
+def _norm(value):
+    text = str(value if value is not None else "").strip()
+    try:
+        return round(float(re.sub(r"[$,\s]", "", text)), 2)
+    except ValueError:
+        return re.sub(r"\s+", " ", text).upper()
+
+
+def _validate(b):
+    """Freeze the validation view on the execution when it closes (after result and outcome are known)."""
+    b["validation"] = validation_view(b)
+    for f in b["validation"]["findings"]:
+        add_event(b, "validation-finding", f)
+
+
+def validation_view(batch):
+    """Control-file loan data vs what ACE found, ACE's verdict, the HITL reviewer's decision, and what happened to each
+    submitted document. Findings are problems eOCR would raise with ACE: they are counted like spec deviations."""
+    outcome = batch.get("outcome") or {}
+    st = (batch.get("status") or {}).get("status") or {}
+    code = outcome.get("code", st.get("code"))
+    description = str(outcome.get("description") or st.get("description") or "")
+    summary = (batch.get("result") or {}).get("summary") or {}
+    rows = summary.get("rows") or []
+    status = summary.get("validationStatus") or ({2000: "FAILED"}.get(code) if code is not None else None)
+    control = ((batch.get("controlFile") or {}).get("loanInfo")) or batch.get("loanInfo") or {}
+    hitl = {f.get("fieldName"): f for f in ((batch.get("hitl") or {}).get("fields") or [])}
+    decided = {f.get("fieldName"): f.get("isMatched") for f in (((batch.get("hitl") or {}).get("decision") or {}).get("fields") or [])}
+
+    def found(field):
+        for want_note in (True, False):
+            for r in rows:
+                if ("NOTE" in str(r.get("documentType", "")).upper()) != want_note:
+                    continue
+                for name, value in (r.get("fields") or {}).items():
+                    if name.lower() == field.lower():
+                        return value, r.get("documentType")
+        return None, None
+
+    fields, findings = [], []
+    for name, expected in control.items():
+        if name in ("loanId", "correlationId", "simulate"):
+            continue
+        label = FIELD_LABELS.get(name, re.sub(r"(?<!^)([A-Z])", r" \1", name).title())
+        value, source = found(name)
+        h = hitl.get(name) or {}
+        if value is None and h.get("extractedValue") is not None:
+            value, source = h.get("extractedValue"), "HITL review"
+        ours = None if value is None else ("match" if _norm(value) == _norm(expected) else "mismatch")
+        named = f"{label} Mismatch".lower() in description.lower() or (code == 2000 and label.lower() in description.lower())
+        ace = "mismatch" if named else ("match" if status == "PASSED" else None)
+        if status == "PASSED" and ours == "mismatch":
+            findings.append(f"ACE passed validation, but {label} on the {source or 'NOTE'} is {value!r} while the control file says {expected!r}")
+        if code == 2000 and ours == "match" and named:
+            findings.append(f"ACE reports a {label} mismatch, but the extracted value {value!r} equals the control file")
+        fields.append({"field": name, "label": label, "control": expected, "extracted": value, "source": source, "ours": ours, "ace": ace,
+                       "hitlExtracted": h.get("extractedValue"), "hitlDecision": decided.get(name)})
+    if code == 2000 and not any(f["ace"] == "mismatch" for f in fields):
+        findings.append(f"VALIDATION_FAILED without naming a mismatched field the control file carries: '{description}'")
+    if status == "FAILED" and code not in (2000, None):
+        findings.append(f"Response.json says validationStatus FAILED but the outcome is {code} {outcome.get('value')}")
+
+    failed = {f.get("documentName"): f.get("reason") for f in (outcome.get("failedDocuments") or []) if isinstance(f, dict)}
+    uploaded = {d["fileName"]: d for d in batch.get("documents") or []}
+    listed = [d.get("fileName") for d in ((batch.get("controlFile") or {}).get("documents") or []) if isinstance(d, dict)]
+    documents = []
+    for name in list(uploaded) + [n for n in listed if n not in uploaded]:
+        d = uploaded.get(name, {"fileName": name, "bytes": None})
+        mine = [r for r in rows if r.get("fileName") == d["fileName"]]
+        precheck = (f"failed: {failed[name]}" if name in failed else "passed" if code in (0, 2000)
+                    else "no failure reported" if code == 1000 else None)
+        documents.append({"fileName": d["fileName"], "bytes": d.get("bytes"), "precheck": precheck,
+                          "note": None if name in uploaded and name in listed else "listed in the control file, not uploaded" if name not in uploaded
+                          else "uploaded, not listed in the control file",
+                          "types": sorted({r.get("documentType") for r in mine}), "pages": ", ".join(str(r.get("pageRange")) for r in mine),
+                          "extractedFields": sum(len(r.get("fields") or {}) for r in mine),
+                          "duplicates": sorted({str(r.get("duplicatePagesOf")) for r in mine if r.get("duplicatePagesOf")})})
+        if code in (0, 2000) and rows and not mine and d["fileName"] not in failed:
+            findings.append(f"{d['fileName']} passed pre-check but is not in Response.json")
+    for name in failed:
+        if name not in uploaded and name not in listed and name != batch.get("controlFileName"):
+            findings.append(f"failedDocuments names {name}, which was not submitted")
+    ran = code in (0, 2000) or status in ("PASSED", "FAILED")
+    return {"validationStatus": status, "ran": ran, "stoppedAt": None if ran or code is None else outcome.get("value") or st.get("value"),
+            "description": description, "fields": fields, "documents": documents, "findings": findings,
+            "hitlUsed": bool(hitl), "complete": batch.get("state") == "CLOSED"}
+
+
 # ------------------------------------------------------------------ batch ledger (eOCR's record of each execution)
 #
 # One JSON document per eOCR execution (correlationId) in s3://<intake>/eocr-sim/batches/, updated with S3
@@ -326,6 +419,8 @@ def _summary(b):
            "callbackAt": (b.get("callback") or {}).get("receivedAt"), "callbackAttempts": (b.get("callback") or {}).get("attempt"),
            "contractErrors": len(set(b.get("contractErrors") or []) | set((b.get("callback") or {}).get("contractErrors") or [])
                                  | set((b.get("result") or {}).get("errors") or [])),
+           "validationFindings": len((b.get("validation") or {}).get("findings") or []),
+           "validationStatus": (b.get("validation") or {}).get("validationStatus"),
            "lastEvent": ((b.get("events") or [None])[-1] or {}).get("message")}
 
 
@@ -368,7 +463,7 @@ def needs_attention(summary):
     except (AttributeError, ValueError):
         stale = False
     return bool((open_ and (summary.get("callbackOverdue") or (summary.get("workflow") or {}).get("state") == "HITL_PENDING")) or stale
-                or summary["state"] == "REJECTED" or summary.get("contractErrors"))
+                or summary["state"] == "REJECTED" or summary.get("contractErrors") or summary.get("validationFindings"))
 
 
 def list_callbacks(limit=500):
@@ -527,6 +622,7 @@ def store_outcome(cid):
               "closedAt": batch["closedAt"], "closedBy": batch["closedBy"], "closedByUser": batch.get("closedByUser"), "outcome": batch["outcome"],
               "callbackAccepted": batch.get("callback"), "callbackAttempts": callback_records(batch["aceJobId"]) if batch.get("aceJobId") else [],
               "statusApiAtClose": batch.get("status"), "stages": batch.get("stages"), "result": batch.get("result"),
+              "validation": batch.get("validation"), "hitl": batch.get("hitl"),
               "responseFileCopy": f"s3://{INTAKE_BUCKET}/{copy}" if copy else None,
               "contractErrors": sorted(set(batch.get("contractErrors") or []) | set((batch.get("callback") or {}).get("contractErrors") or [])
                                        | set((batch.get("result") or {}).get("errors") or []))}
@@ -642,6 +738,7 @@ def on_callback(job_id, record):
         b.update(state="CLOSED", closedAt=now_iso(), closedBy="callback",
                  outcome={"code": st.get("code"), "value": st.get("value"), "description": st.get("description"),
                           "batchPath": p.get("batchPath"), "failedDocuments": p.get("failedDocuments")})
+        _validate(b)
         add_event(b, "closed", f"execution closed on callback: {st.get('code')} {st.get('value')}")
 
     update_batch(cid, close)
@@ -959,6 +1056,10 @@ class Scenario:
         self.ok(f"HITL review shown to reviewer: totalMatches={review['totalMatches']}, fields={[(f['fieldName'], f.get('isMatched')) for f in review['fieldDetails']]}")
         code, resp = call("POST", "/validate/updateValidation", {"clientLoanNumber": self.loan_id, "adr": self.job, "updatedFields": fields})
         self.ok(f"HITL reviewer confirmed mismatches {self.hitl_reject} -> HTTP {code}")
+        self.trace(lambda b: b.update(hitl={"loadedAt": now_iso(), "loadedBy": operator(), "fields": review["fieldDetails"],
+                                            "totalMatches": review.get("totalMatches"),
+                                            "decision": {"at": now_iso(), "by": operator(), "httpStatus": code,
+                                                         "fields": [{"fieldName": f["fieldName"], "isMatched": f["isMatched"]} for f in fields]}}))
         self.hitl_reject = []
 
     def callbacks(self, timeout_s=900):

@@ -254,6 +254,12 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
 def hitl_review(cid):
     batch = get(cid)
     code, body = sim.call("POST", "/validate/reviewValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"]}, base=batch.get("aceUrl"))
+    if code == 200 and isinstance(body, dict) and isinstance(body.get("fieldDetails"), list):
+        def keep(b):  # the review is what the NOTE said; keep it for the validation view after the job ends
+            b["hitl"] = {**(b.get("hitl") or {}), "loadedAt": now_iso(), "loadedBy": sim.operator(), "fields": body["fieldDetails"],
+                         "totalMatches": body.get("totalMatches")}
+            add_event(b, "hitl", f"HITL review loaded: {len(body['fieldDetails'])} fields, totalMatches {body.get('totalMatches')}")
+        update_batch(cid, keep)
     return {"httpStatus": code, "review": body}
 
 
@@ -262,7 +268,12 @@ def hitl_decide(cid, fields):
     batch = get(cid)
     code, body = sim.call("POST", "/validate/updateValidation", {"clientLoanNumber": batch["loanId"], "adr": batch["aceJobId"], "updatedFields": fields}, base=batch.get("aceUrl"))
     rejected = [f["fieldName"] for f in fields if not f.get("isMatched")]
-    update_batch(cid, lambda b: add_event(b, "hitl", f"HITL reviewer decision sent -> HTTP {code}; mismatched: {rejected or 'none'}", response=body))
+
+    def keep(b):
+        b["hitl"] = {**(b.get("hitl") or {}), "decision": {"at": now_iso(), "by": sim.operator(), "httpStatus": code,
+                                                         "fields": [{"fieldName": f.get("fieldName"), "isMatched": bool(f.get("isMatched"))} for f in fields]}}
+        add_event(b, "hitl", f"HITL reviewer decision sent -> HTTP {code}; mismatched: {rejected or 'none'}", response=body)
+    update_batch(cid, keep)
     return {"httpStatus": code, "response": body}
 
 
@@ -294,6 +305,8 @@ def close(cid, note=""):
         else:
             b["outcome"] = {"code": None, "value": "ABANDONED", "description": note or "closed by the operator before ACE finished",
                             "batchPath": "", "failedDocuments": []}
+        if terminal:
+            sim._validate(b)
         add_event(b, "closed", f"execution closed by {by}" + (f" from Status API {st.get('code')} {st.get('value')} (no callback received)" if terminal and not b.get("callback") else "")
                   + (f": {note}" if note else ""))
     update_batch(cid, change)
@@ -324,6 +337,8 @@ def detail(cid):
     batch["callbacks"] = sim.callback_records(batch["aceJobId"]) if batch.get("aceJobId") else []
     batch["controlPreview"] = sim.build_control_file(batch)
     batch["records"] = sim.list_records(cid)
+    if batch["state"] != "CLOSED" or not batch.get("validation"):
+        batch["validation"] = sim.validation_view(batch)  # live view while open; frozen at close
     batch["s3"] = {"intake": f"s3://{INTAKE_BUCKET}/{batch['folder']}", "output": f"s3://{OUTPUT_BUCKET}/{batch['aceJobId']}/" if batch.get("aceJobId") else None}
     return batch
 

@@ -84,7 +84,8 @@ aside .tools select { flex: 1; }
 .item:hover { background: var(--soft); }
 .item.sel { background: var(--info-bg); }
 .item .top { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-.item .cid { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .cid { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 100%; }
+.item .top { flex-wrap: wrap; justify-content: flex-start; row-gap: 3px; }
 .item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
 section#detail { padding: 18px 22px 40px; min-width: 0; }
 .empty { color: var(--muted); padding: 40px; text-align: center; }
@@ -288,7 +289,7 @@ const stateChip = b => {
   if (b.state === "CLOSED" && b.outcome) {
     if (![0, 1000, 2000, 3000, null].includes(b.outcome.code) && b.outcome.value !== "ABANDONED") return chip("CLOSED · INVALID CALLBACK", "s-bad");
     const n = errCount(b);
-    if (b.outcome.code === 0 && n) return chip(`CLOSED · COMPLETED · ${n} spec issue${n > 1 ? "s" : ""}`, "s-warn");
+    if (b.outcome.code === 0 && n) return chip(`CLOSED · COMPLETED · ${n} issue${n > 1 ? "s" : ""}`, "s-warn");
     return chip(`CLOSED · ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad");
   }
   return chip(b.state, STATE_CLASS[b.state] || "s-idle");
@@ -365,8 +366,9 @@ function steps(b) {
 
 const STALE_H = 24;
 const OPEN = b => !["CLOSED", "REJECTED", "DRAFT", "STAGED"].includes(b.state);
-const errCount = b => typeof b.contractErrors === "number" ? b.contractErrors
-  : new Set([...(b.contractErrors || []), ...((b.callback || {}).contractErrors || []), ...((b.result || {}).errors || [])]).size;
+const errCount = b => typeof b.contractErrors === "number" ? b.contractErrors + (b.validationFindings || 0)
+  : new Set([...(b.contractErrors || []), ...((b.callback || {}).contractErrors || []), ...((b.result || {}).errors || []),
+             ...((b.validation || {}).findings || [])]).size;
 const isHitl = b => OPEN(b) && (((b.status || {}).workflow || b.workflow || {}).state === "HITL_PENDING");
 const isStale = b => OPEN(b) && Date.now() - Date.parse(b.updatedAt) > STALE_H * 3600e3;
 const needsAttention = b => (OPEN(b) && b.callbackOverdue) || isHitl(b) || isStale(b) || b.state === "REJECTED" || errCount(b) > 0;
@@ -385,7 +387,7 @@ function statusBanner(b) {
     const aceSays = ((b.status || {}).status) || {};
     if (![0, 1000, 2000, 3000, null].includes(o.code) && o.value !== "ABANDONED") [tone, t, d] = ["bad", "ACE sent an invalid callback",
       `Its status was code ${esc(JSON.stringify(o.code))} / value ${esc(JSON.stringify(o.value))}, which the spec does not allow.${aceSays.value ? ` ACE's Status API says ${esc(aceSays.code)} ${esc(aceSays.value)}.` : ""}`];
-    else if (o.code === 0 && (errCount(b) || (b.result && b.result.ok === false))) [tone, t, d] = ["warn", "Completed, with problems", `${esc(o.description)} ACE reported success, but what it sent does not meet the spec (see Spec compliance).`];
+    else if (o.code === 0 && (errCount(b) || (b.result && b.result.ok === false))) [tone, t, d] = ["warn", "Completed, with problems", `${esc(o.description)} ACE reported success, but the result has problems (see Validation and Spec compliance).`];
     else if (o.code === 0) [tone, t, d] = ["ok", "Completed", `${esc(o.description)}${sm ? ` Result: ${sm.documents} documents in ${sm.documentTypes} types, ${sm.extractedFields} extracted fields.` : ""}`];
     else if (o.value === "ABANDONED") [tone, t, d] = ["warn", "Closed by hand before ACE finished", esc(o.description)];
     else [tone, t, d] = ["bad", `Failed: ${o.value}`, `${esc(o.description)}${(o.failedDocuments || []).length ? " — " + o.failedDocuments.map(f => `${esc(f.documentName)} (${esc(f.reason)})`).join(", ") : ""}`];
@@ -400,7 +402,7 @@ function statusBanner(b) {
   else [tone, t, d] = [isStale(b) ? "warn" : "info", isStale(b) ? `No progress for over ${STALE_H} hours` : "ACE is processing",
     `ACE stage <b>${esc(wf.stage || "queued")}</b> ${esc(wf.state || "")}${since}. Submitted ${when(b.submittedAt)}${b.submittedBy ? " by " + esc(b.submittedBy) : ""}; checked every ${esc(cfg.trackIntervalSeconds)}s.`];
   const errs = errCount(b);
-  if (errs) d += ` <b style="color:var(--bad)">${errs} spec deviation(s) — see Spec compliance.</b>`;
+  if (errs) d += ` <b style="color:var(--bad)">${errs} problem(s) — see Validation and Spec compliance.</b>`;
   return `<div class="banner ${tone}"><div><div class="t">${t}</div><div class="d">${d}</div></div>${go ? `<button class="primary go" data-goto="${go}">${
     go === "hitl" ? "Open review" : "Open package"}</button>` : ""}</div>`;
 }
@@ -434,6 +436,7 @@ function render(b) {
       ${trackCard(b, st, wf)}
       ${callbackCard(b)}
       ${resultCard(b)}
+      ${validationCard(b)}
       ${checksCard(b)}
       ${recordsCard(b)}
       ${timelineCard(b)}
@@ -541,8 +544,10 @@ function resultCard(b) {
   const o = b.outcome, r = b.result;
   if (!o) return `<div class="card"><h3><span class="n">6</span>Result</h3><p class="hint">Filled in when the execution closes: outcome, failed documents and the retrieved *Response.json.</p></div>`;
   const s = (r || {}).summary;
-  return `<div class="card wide"><h3><span class="n">6</span>Result ${chip(`${o.code ?? "—"} ${o.value}`, o.code === 0 ? "s-ok" : "s-bad")}</h3>
-    <dl class="kv"><dt>description</dt><dd>${esc(o.description)}</dd><dt>closed</dt><dd>${when(b.closedAt)} by ${esc(b.closedBy)}${b.closedByUser ? " · " + esc(b.closedByUser) : ""}</dd>
+  const valid = [0, 1000, 2000, 3000, null].includes(o.code) || o.value === "ABANDONED";
+  return `<div class="card wide"><h3><span class="n">6</span>Result ${valid ? chip(`${o.code ?? "—"} ${o.value}`, o.code === 0 ? "s-ok" : "s-bad")
+      : chip(`invalid callback status: ${JSON.stringify(o.code)} ${o.value}`, "s-bad")}</h3>
+    <dl class="kv"><dt>description</dt><dd>${o.description ? esc(o.description) : `<span class="hint">(empty)</span>`}</dd><dt>closed</dt><dd>${when(b.closedAt)} by ${esc(b.closedBy)}${b.closedByUser ? " · " + esc(b.closedByUser) : ""}</dd>
       <dt>Result file</dt><dd class="mono">${esc(o.batchPath || "—")}</dd>
       ${(o.failedDocuments || []).length ? `<dt>Failed documents</dt><dd>${o.failedDocuments.map(f => `<div><span class="mono">${esc(f.documentName)}</span> — ${esc(f.reason)}</div>`).join("")}</dd>` : ""}
       ${r && r.key ? `<dt>Response.json</dt><dd class="mono">${esc(r.key)} ${r.ok ? chip("matches spec 6.4/6.5", "s-ok") : chip("contract errors", "s-bad")}</dd>` : ""}
@@ -554,6 +559,39 @@ function resultCard(b) {
         <td>${esc(x.docTypeName || x.docTypeId)}${x.duplicatePagesOf ? ` <span class="chip s-warn">dup of ${esc(x.duplicatePagesOf)}</span>` : ""}</td>
         <td>${Object.entries(x.fields || {}).map(([k, v]) => `<div><span class="mono">${esc(k)}</span>: ${esc(v)}</div>`).join("") || "—"}</td></tr>`).join("")}</table></div>
       <p><button id="r-raw">View raw Response.json</button></p><pre id="r-json" hidden></pre>` : ""}
+  </div>`;
+}
+
+function validationCard(b) {
+  const v = b.validation;
+  if (!v || !b.aceJobId) return "";
+  const vs = v.validationStatus;
+  const mark = x => x === "match" ? chip("match", "s-ok") : x === "mismatch" ? chip("mismatch", "s-bad") : `<span class="hint" style="margin:0">—</span>`;
+  const hitlCell = f => f.hitlDecision === true ? chip("confirmed match", "s-ok") : f.hitlDecision === false ? chip("confirmed mismatch", "s-bad")
+    : f.hitlExtracted != null ? `<span class="mono">${esc(f.hitlExtracted)}</span> <span class="hint" style="margin:0">(no decision)</span>` : "—";
+  const noValues = vs === "FAILED" && !v.fields.some(f => f.extracted != null);
+  return `<div class="card wide"><h3>Validation ${vs ? chip(`NOTE validation ${vs}`, vs === "PASSED" ? "s-ok" : vs === "FAILED" ? "s-bad" : "s-idle")
+      : chip(v.stoppedAt ? "did not run" : b.state === "CLOSED" ? "not reported" : "pending", "s-idle")}
+      ${v.findings.length ? chip(`${v.findings.length} finding${v.findings.length > 1 ? "s" : ""}`, "s-bad") : ""}</h3>
+    <p class="hint">Loan data in the control file against what ACE read from the NOTE, ACE's verdict and the HITL reviewer's decision,
+      then what ACE did with each document. "Our check" is the simulator's own comparison.</p>
+    ${v.stoppedAt ? `<p class="hint"><b>ACE stopped before NOTE validation (${esc(v.stoppedAt)}).</b> The loan data below was not compared.</p>` : ""}
+    ${v.fields.length ? `<div style="overflow-x:auto"><table><tr><th>field</th><th>control file</th><th>found by ACE</th><th>our check</th><th>ACE verdict</th><th>HITL reviewer</th></tr>
+      ${v.fields.map(f => `<tr><td>${esc(f.label)}</td><td class="mono">${esc(f.control)}</td>
+        <td>${f.extracted != null ? `<span class="mono">${esc(f.extracted)}</span> <span class="hint" style="margin:0">${esc(f.source || "")}</span>` : "—"}</td>
+        <td>${mark(f.ours)}</td><td>${mark(f.ace)}</td><td>${hitlCell(f)}</td></tr>`).join("")}</table></div>` : `<p class="hint">The control file carries no loan fields to validate.</p>`}
+    ${noValues ? `<p class="hint">ACE returns no extracted values on VALIDATION_FAILED (spec 6.5). The values come from the HITL review;
+      open it while the job waits for review and the console keeps it.</p>` : ""}
+    ${v.description && [2000].includes((b.outcome || {}).code) ? `<p class="hint">ACE's description: <b>${esc(v.description)}</b></p>` : ""}
+    <h4 style="margin:14px 0 6px;font-size:13px">Document checks</h4>
+    <div style="overflow-x:auto"><table><tr><th>document</th><th>size</th><th>pre-check</th><th>classified as</th><th>pages</th><th>extracted fields</th></tr>
+      ${v.documents.map(d => `<tr><td class="mono">${esc(d.fileName)}</td><td>${d.bytes == null ? "—" : fmt(d.bytes)}</td>
+        <td>${d.precheck == null ? "—" : d.precheck === "passed" ? chip("passed", "s-ok") : d.precheck.startsWith("failed") ? chip(d.precheck, "s-bad")
+          : `<span class="hint" style="margin:0">${esc(d.precheck)}</span>`}${d.note ? `<div class="hint" style="margin:2px 0 0;color:var(--warn)">${esc(d.note)}</div>` : ""}</td>
+        <td>${d.types.length ? d.types.map(t => esc(t)).join(", ") : "—"}${d.duplicates.length ? " " + chip(`duplicate of ${d.duplicates.join(", ")}`, "s-warn") : ""}</td>
+        <td class="mono">${esc(d.pages || "—")}</td><td>${d.types.length ? d.extractedFields : "—"}</td></tr>`).join("")}</table></div>
+    ${v.findings.length ? `<ul class="errs" style="margin-top:10px">${v.findings.map(f => `<li>${esc(f)}</li>`).join("")}</ul>`
+      : b.state === "CLOSED" ? `<p class="okline">Validation and document results are consistent.</p>` : ""}
   </div>`;
 }
 
@@ -580,7 +618,7 @@ function checksCard(b) {
 
 function timelineCard(b) {
   const evs = [...(b.events || [])].reverse();
-  const cls = t => ({"contract-error": "s-bad", rejected: "s-bad", error: "s-bad", warning: "s-warn", "callback-refused": "s-warn", closed: "s-ok", callback: "s-ok", result: "s-info"}[t] || "s-idle");
+  const cls = t => ({"validation-finding": "s-bad", hitl: "s-warn", "contract-error": "s-bad", rejected: "s-bad", error: "s-bad", warning: "s-warn", "callback-refused": "s-warn", closed: "s-ok", callback: "s-ok", result: "s-info"}[t] || "s-idle");
   return `<div class="card wide"><h3>Timeline <span style="font-weight:400;color:var(--muted)">(${evs.length} events, newest first)</span></h3>
     <div class="scroll" style="max-height:420px">${evs.map(e => `<div class="ev"><span class="t">${when(e.at)}</span><span>${chip(e.type, cls(e.type))}</span>
       <div>${esc(e.message)}${e.by ? ` <span style="color:var(--muted)">— ${esc(e.by)}</span>` : ""}${e.data ? `<details><summary class="hint" style="margin:0">details</summary><pre>${J(e.data)}</pre></details>` : ""}</div></div>`).join("")}</div>

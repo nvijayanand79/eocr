@@ -113,6 +113,25 @@ The executions list shows 50 per page with Prev/Next and filters on the server (
 Board columns show 20 cards and "Show more". The callbacks tab shows 100 deliveries per page with server-side filters.
 Every list item and card shows who submitted it and when, and how long it took.
 
+### Validation view
+
+Each execution's Tracking tab has a **Validation** section:
+
+- **NOTE validation**: for every loan field in the control file (seller loan number, loan amount, borrower last name,
+  and any other), the control-file value, the value ACE found (NOTE first, then other document types), the simulator's
+  own comparison (numbers compared as amounts, text case-insensitively), ACE's verdict (from `validationStatus` and
+  the mismatches its description names) and the HITL reviewer's decision. On VALIDATION_FAILED ACE returns no extracted
+  values (spec 6.5), so the values come from the HITL review, which the console keeps once it has been loaded.
+  When ACE stopped earlier (pre-check or processing failure) the section says validation did not run.
+- **Document checks**: every submitted document, and any the control file lists but the folder lacks, with its
+  pre-check result, the document types ACE classified it into, pages, extracted fields and duplicate pages.
+- **Findings**, counted like spec deviations (needs attention, "N issues" chip): ACE passed validation although a NOTE
+  value differs from the control file; ACE reports a mismatch for a field whose values are equal; VALIDATION_FAILED
+  without naming a field; `validationStatus` FAILED on another outcome; a document that passed pre-check but is not in
+  Response.json; `failedDocuments` naming a file that was never submitted.
+
+The view is frozen on the execution and in `outcome.json` when it closes.
+
 ### How problems are reported
 
 | Problem | What the console shows |
@@ -126,6 +145,8 @@ Every list item and card shows who submitted it and when, and how long it took.
 | No progress for 24h | *no change 24h+* flag |
 | Callback breaks the spec (fields, code type, code/value pair, output rules, timestamp) | "ACE sent an invalid callback" banner, each deviation listed, callbacks badge |
 | Callback disagrees with the Status API | spec deviation naming both values |
+| ACE passes validation although the NOTE disagrees with the control file | Validation finding, "Completed, with problems" |
+| A submitted document is missing from the result | Validation finding naming the document |
 | Result file missing or off-spec | "Completed, with problems" banner and list chip, each deviation listed |
 
 Everything flagged counts in the *need attention* tile, the Pipeline badge and the "Needs attention" list filter.
