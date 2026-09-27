@@ -20,7 +20,7 @@ Scenarios (`run --only a,b`):
 | `happy-path` | 120-159 NOTE-bearing pages split into 3 PDFs, extraction required; eOCR refuses the first 2 callbacks (503) | COMPLETED (0), NOTE validation PASSED, extracted fields, callback retried with the same Idempotency-Key |
 | `no-extraction` | 40-69 pages, one PDF, `extractionRequired=false`, batchPath given as the folder | COMPLETED (0), extraction objects empty |
 | `resubmission` | the same PDF as `no-extraction`, new correlationId, after it finishes | a new aceJobId, COMPLETED (0). (With ACE's duplicate detection switched on, integration would end it as PROCESSING_FAILED naming the original.) |
-| `validation-failed` | 80-109 pages, wrong loan amount and seller loan number | HITL review (the harness confirms the mismatches as the reviewer) -> VALIDATION_FAILED (2000) with Response.json without extraction |
+| `validation-failed` | 80-109 pages, wrong loan amount and seller loan number | ACE's NOTE review (the ACE reviewer confirms the mismatches in ACE) -> VALIDATION_FAILED (2000) with Response.json without extraction |
 | `precheck-failed` | good PDF + password-protected PDF + corrupt PDF | PRECHECK_FAILED (1000) naming both bad files |
 | `control-file-mismatch` | control file loanId differs from the request | PRECHECK_FAILED (1000) naming the control file |
 
@@ -55,7 +55,7 @@ step traced end to end.
   - a status panel in plain words: what is happening, or what went wrong, *where* (the failed stage), each affected
     item with its problem and how to fix it (a rejected document and the reason; a loan field with the control-file
     value against the NOTE value; ACE's refusal), what to do next, and one-click actions (resubmit as a new job, open
-    the HITL review, close from the Status API, copy a failure summary);
+    close from the Status API, copy a failure summary);
   - **Where the job is**: a stage track of the eOCR steps and every stage ACE reports, each with its time and
     duration, the current step highlighted and the failed one in red;
   - tabs: *Overview* (what was sent and what came back), *Files in S3* (the input folder, ACE's output folder and
@@ -65,13 +65,13 @@ step traced end to end.
 
 **Tests.** New job starts with *What do you want to test?*: happy path, classification only, package in several files,
 eOCR endpoint down for 2 callbacks, password-protected file, corrupt file, document missing from the folder, control
-file for another loan, loan data differs from the NOTE (the simulator answers ACE's HITL review itself). A test stages
+file for another loan, loan data differs from the NOTE (ACE's reviewer decides the NOTE review in ACE). A test stages
 its package and states the expected outcome (outcome code, failed documents and reasons, NOTE validation, words in
 ACE's description, callback attempt, "ACE must follow the spec"); all of it is editable in the Submit step, and a
 from-scratch job can have one too. When the job ends it shows **Test passed** or **Test failed** with each check, an
 expected failure reads "As expected", and Jobs / the dashboard count tests passed. The verdict is kept in `outcome.json`.
 
-**ACE exchanges and evidence.** Every call the simulator makes to ACE (onboarding, each status poll, HITL review,
+**ACE exchanges and evidence.** Every call the simulator makes to ACE (onboarding, each status poll,
 close) is logged per job with request and response headers and bodies, status and time taken (credentials redacted;
 identical repeated polls folded into one line); the *ACE exchanges* tab shows them with ACE's callbacks in order.
 **Evidence** downloads one zip per job: `SUMMARY.txt` (what happened, the verdict, the stages, the deviations),
@@ -89,7 +89,7 @@ output buckets, the test loan, the tracker's last pass, the last callback receiv
 configuration in use. *Send a test notification* posts one message to the webhook.
 
 **Notifications.** With `SIM_NOTIFY_WEBHOOK` set (Slack, Teams or any endpoint taking `{"text": "..."}`), the console
-posts once per job and reason when: a HITL review is waiting (not for tests that answer it themselves), ACE finished
+posts once per job and reason when: a review is waiting in ACE, ACE finished
 but has not called back, an open job has made no progress for 24 h, ACE refused a submission, a test failed (with
 each failed check), or a job closed with a problem. Passing tests and clean completions stay quiet. Each message links
 to the job when `SIM_PUBLIC_URL` is set, and is also recorded in the job's activity whether or not it was sent.
@@ -106,7 +106,7 @@ The steps and the spec sections behind them:
 | 2. Documents | uploads files into `s3://<intake>/loanId=<id>/correlationId=<execution>/`; one click adds a test package slice around the NOTE, a password-protected PDF or a corrupt PDF | 3.1 |
 | 3. Control file | form (loanInfo, `extractionRequired`) with live JSON preview, or hand-edited raw JSON for negative tests; "Write control file to S3" | 3.2 |
 | 4. Onboarding | `POST /integration/loan/onboarding` with the control file or folder as `batchPath`; optionally refuse the first N callbacks (503) | 4 |
-| 5. Tracking | polls `GET /integration/loan/status/{aceJobId}` for every open execution and records each stage/state change; HITL panel when `HITL_PENDING` (acts as the ACE reviewer) | 7 |
+| 5. Tracking | polls `GET /integration/loan/status/{aceJobId}` for every open execution and records each stage/state change; shows "Waiting for the ACE reviewer" when `HITL_PENDING` (reviews are done in ACE) | 7 |
 | 6. Callback | every delivery attempt: HTTP answer, caller principal, Idempotency-Key, contract errors | 5, 6 |
 | 7. Close | on the accepted callback: fetch and check `*Response.json`, compare with the Status API, close. **Close...** reconciles by hand when no callback comes (Status API terminal -> result retrieved; otherwise ABANDONED). A late callback after that is recorded, not re-processed | 3.3, 6.4, 6.5, 7 |
 
@@ -169,7 +169,7 @@ Lifecycle: `DRAFT -> STAGED -> SUBMITTED -> IN_PROGRESS -> CALLBACK_RECEIVED -> 
 
 ### Sign-in: who did what
 
-Every action (create, upload, write control file, submit, HITL decision, close, resubmit) needs a signed-in user; the
+Every action (create, upload, write control file, submit, close, resubmit) needs a signed-in user; the
 server refuses anything else with 401. The user is stored on the execution (`createdBy`, `submittedBy` with the time,
 `closedByUser`), in the submission and outcome records, and on every timeline event. Scenario runs are recorded as
 `scenario runner (…)` (set `SIM_RUN_BY` to name the pipeline or person that started them).
@@ -193,7 +193,7 @@ Each execution's Tracking tab has a **Validation** section:
   and any other), the control-file value, the value ACE found (NOTE first, then other document types), the simulator's
   own comparison (numbers compared as amounts, text case-insensitively), ACE's verdict (from `validationStatus` and
   the mismatches its description names) and the HITL reviewer's decision. On VALIDATION_FAILED ACE returns no extracted
-  values (spec 6.5), so the values come from the HITL review, which the console keeps once it has been loaded.
+  values (spec 6.5).
   When ACE stopped earlier (pre-check or processing failure) the section says validation did not run.
 - **Document checks**: every submitted document, and any the control file lists but the folder lacks, with its
   pre-check result, the document types ACE classified it into, pages, extracted fields and duplicate pages.
@@ -238,7 +238,7 @@ whether pageRange stays within each PDF's page count.
 | Pre-check failed (password-protected, corrupt, missing file, control-file loanId mismatch) | red banner with each failed document and reason; a document the control file lists but the folder lacks is also warned about before you submit |
 | Processing failed (3000) | red banner with ACE's description |
 | ACE refused the submission | REJECTED, banner with ACE's HTTP status and message, submission record with the response |
-| HITL review waiting | amber "Action needed" banner with a button to the review; flagged *needs attention* |
+| Review waiting in ACE | amber "Action needed" banner ("Waiting for the ACE reviewer"); flagged *needs attention* |
 | ACE finished but never called back | *no callback* flag after `SIM_CALLBACK_GRACE_SECONDS`; Close… reconciles from the Status API and retrieves the result |
 | No progress for 24h | *no change 24h+* flag |
 | Callback breaks the spec (fields, code type, code/value pair, output rules, timestamp) | "ACE sent an invalid callback" banner, each deviation listed, callbacks badge |
