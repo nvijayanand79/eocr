@@ -54,8 +54,7 @@ Each execution opens on a **status banner** that says in words what is happening
 do (e.g. "Action needed: HITL review", "ACE finished but has not called back"). It then shows two sub-tabs:
 **Tracking** (progress in ACE, callbacks, result, spec compliance, stored records, timeline), the default once
 submitted, and **Package & submission** (documents, control file, submit). Times are shown in your local time, with
-UTC on hover. Enter your name at the top right (kept in the browser): it is recorded as creator, submitter or closer
-and on every timeline event you cause, and the pipeline can show "only mine". The **?** button explains the terms.
+UTC on hover. Sign-in (below) records who created, submitted and closed each execution, and the pipeline can show "only mine". The **?** button explains the terms.
 
 Views, for coming back days later:
 
@@ -96,6 +95,42 @@ requests (`If-Match`), so the console, the callback receiver and a separate `run
 
 Lifecycle: `DRAFT -> STAGED -> SUBMITTED -> IN_PROGRESS -> CALLBACK_RECEIVED -> CLOSED` (`REJECTED` when onboarding is refused).
 
+### Sign-in: who did what
+
+Every action (create, upload, write control file, submit, HITL decision, close, resubmit) needs a signed-in user; the
+server refuses anything else with 401. The user is stored on the execution (`createdBy`, `submittedBy` with the time,
+`closedByUser`), in the submission and outcome records, and on every timeline event. Scenario runs are recorded as
+`scenario runner (…)` (set `SIM_RUN_BY` to name the pipeline or person that started them).
+
+| `SIM_AUTH` | How the user is known | Use when |
+|---|---|---|
+| `name` (default) | a sign-in screen asks for a name and keeps it in a cookie | the console is reached by SSM port-forward; it records who, it does **not** authenticate |
+| `oidc` | the console sits behind an ALB with an OIDC listener rule (company SSO or Cognito). The ALB signs the user's claims into `x-amzn-oidc-data`; the console verifies the ES256 signature with the ALB's regional public key, the signer (`SIM_ALB_ARN`) and the expiry, and takes the user from `SIM_OIDC_USER_CLAIMS` (default `email,preferred_username,name,sub`). No sign-in screen and a forged header is rejected | people open the console in a browser; set `SIM_CONSOLE_HOST=0.0.0.0` and put the ALB in front (infra change) |
+
+### Lists and paging
+
+The executions list shows 50 per page with Prev/Next and filters on the server (search, state, "needs attention").
+Board columns show 20 cards and "Show more". The callbacks tab shows 100 deliveries per page with server-side filters.
+Every list item and card shows who submitted it and when, and how long it took.
+
+### How problems are reported
+
+| Problem | What the console shows |
+|---|---|
+| NOTE validation failed (HITL confirmed mismatches) | red banner "Failed: VALIDATION_FAILED" with ACE's description (e.g. "Loan Amount Mismatch, Seller Loan Number Mismatch."), Response.json with `validationStatus FAILED` and no extraction |
+| Pre-check failed (password-protected, corrupt, missing file, control-file loanId mismatch) | red banner with each failed document and reason; a document the control file lists but the folder lacks is also warned about before you submit |
+| Processing failed (3000) | red banner with ACE's description |
+| ACE refused the submission | REJECTED, banner with ACE's HTTP status and message, submission record with the response |
+| HITL review waiting | amber "Action needed" banner with a button to the review; flagged *needs attention* |
+| ACE finished but never called back | *no callback* flag after `SIM_CALLBACK_GRACE_SECONDS`; Close… reconciles from the Status API and retrieves the result |
+| No progress for 24h | *no change 24h+* flag |
+| Callback breaks the spec (fields, code type, code/value pair, output rules, timestamp) | "ACE sent an invalid callback" banner, each deviation listed, callbacks badge |
+| Callback disagrees with the Status API | spec deviation naming both values |
+| Result file missing or off-spec | "Completed, with problems" banner and list chip, each deviation listed |
+
+Everything flagged counts in the *need attention* tile, the Pipeline badge and the "Needs attention" list filter.
+`dev/fake_ace.py` can produce each of these on purpose (see its docstring) so the reporting can be checked locally.
+
 ### Opening it
 
 The console has no login of its own, so by default it binds to `127.0.0.1` inside the task and is not in the
@@ -119,6 +154,9 @@ the intake bucket, read the output bucket and the test data.
 | `SIM_CALLBACK_GRACE_SECONDS` | `600` | after the Status API goes terminal, how long before "no callback" is flagged |
 | `SIM_MAX_UPLOAD_MB` | `512` | per file |
 | `SIM_ACE_URL_ALLOWED` | (any) | comma-separated ACE base URLs a submission or the default may use |
+| `SIM_AUTH` | `name` | `name` (sign-in screen) or `oidc` (ALB single sign-on, verified) |
+| `SIM_ALB_ARN` | | with `oidc`: only tokens signed by this ALB are accepted |
+| `SIM_OIDC_USER_CLAIMS` | `email,preferred_username,name,sub` | with `oidc`: which claim names the user |
 
 ### Trying it locally (no AWS)
 

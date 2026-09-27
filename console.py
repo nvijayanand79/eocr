@@ -26,6 +26,74 @@ CONTENT_TYPES = {".pdf": "application/pdf", ".tif": "image/tiff", ".tiff": "imag
                  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".json": "application/json", ".txt": "text/plain"}
 
 
+# ------------------------------------------------------------------ who is using the console
+#
+# SIM_AUTH=oidc  the console sits behind an ALB with OIDC (company SSO / Cognito). The ALB signs the user's claims into
+#                x-amzn-oidc-data (ES256); the signature is verified against the ALB's regional public key, so the
+#                identity cannot be forged even by someone who reaches the port directly. No sign-in screen.
+# SIM_AUTH=name  (default) a sign-in screen that asks for a name and keeps it in a cookie. It records who did what;
+#                it is not authentication, which is why the console then stays on loopback behind SSM.
+
+AUTH = os.environ.get("SIM_AUTH", "name").lower()
+ALB_ARN = os.environ.get("SIM_ALB_ARN", "")
+OIDC_KEY_URL = os.environ.get("SIM_OIDC_KEY_URL", "https://public-keys.auth.elb.{region}.amazonaws.com/{kid}")
+OIDC_CLAIMS = [c.strip() for c in os.environ.get("SIM_OIDC_USER_CLAIMS", "email,preferred_username,name,sub").split(",") if c.strip()]
+COOKIE = "eocr_user"
+_alb_keys = {}
+
+
+def _b64(part):
+    import base64
+    part = part.rstrip("=")
+    return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+
+def oidc_user(token):
+    """The user in an ALB x-amzn-oidc-data token, or None when it is missing, forged, from another ALB or expired."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, utils
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    try:
+        h64, p64, s64 = token.split(".")
+        header = json.loads(_b64(h64))
+        if header.get("alg") != "ES256" or (ALB_ARN and header.get("signer") != ALB_ARN):
+            return None
+        kid = header["kid"]
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", kid):
+            return None
+        if kid not in _alb_keys:
+            import urllib.request
+            with urllib.request.urlopen(OIDC_KEY_URL.format(region=sim.REGION, kid=kid), timeout=10) as r:
+                _alb_keys[kid] = load_pem_public_key(r.read())
+        sig = _b64(s64)
+        der = utils.encode_dss_signature(int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big"))
+        _alb_keys[kid].verify(der, f"{h64}.{p64}".encode(), ec.ECDSA(hashes.SHA256()))
+        claims = json.loads(_b64(p64))
+        if claims.get("exp") and float(claims["exp"]) < time.time():
+            return None
+        return next((str(claims[c]) for c in OIDC_CLAIMS if claims.get(c)), None)
+    except Exception as exc:
+        sim.log("OIDC token rejected", error=f"{type(exc).__name__}: {exc}")
+        return None
+
+
+def clean_name(value):
+    return re.sub(r"[^\w .@'-]", "", str(value or ""))[:64].strip()
+
+
+def current_user(handler):
+    if AUTH == "oidc":
+        token = handler.headers.get("x-amzn-oidc-data")
+        return oidc_user(token) if token else None
+    from http.cookies import SimpleCookie
+    jar = SimpleCookie()
+    try:
+        jar.load(handler.headers.get("Cookie") or "")
+    except Exception:
+        return None
+    return clean_name(urllib.parse.unquote(jar[COOKIE].value)) if COOKIE in jar else None
+
+
 # ------------------------------------------------------------------ actions (each one is a step eOCR takes)
 
 def get(cid):
@@ -176,7 +244,7 @@ def submit(cid, batch_path_mode="file", flaky=0, ace_url=None):
                 b["contractErrors"].append(msg)
                 add_event(b, "contract-error", msg)
         else:
-            b["state"] = "REJECTED"
+            b.update(state="REJECTED", submittedAt=now_iso(), submittedBy=sim.operator())
             add_event(b, "rejected", f"onboarding at {ace_url} -> HTTP {code}", request=request, response=resp)
     update_batch(cid, change)
     sim.store_submission(cid, request, code, resp)
@@ -316,6 +384,32 @@ def route(method, pattern):
 CID = r"/api/batches/(?P<cid>[A-Za-z0-9][A-Za-z0-9._-]{0,127})"
 
 
+PUBLIC = {"/api/me", "/api/login", "/api/logout"}
+
+
+@route("GET", r"/api/me")
+def _me(h, q):
+    return {"user": sim.operator(), "mode": AUTH}
+
+
+@route("POST", r"/api/login")
+def _login(h, q):
+    if AUTH != "name":
+        raise Conflict("sign-in is handled by single sign-on")
+    name = clean_name(h.json().get("name"))
+    if len(name) < 2:
+        raise ValueError("enter your name (at least 2 characters)")
+    h.cookie = f"{COOKIE}={urllib.parse.quote(name)}; Path=/; Max-Age=2592000; SameSite=Strict; HttpOnly"
+    sim.log("console sign-in", user=name)
+    return {"user": name, "mode": AUTH}
+
+
+@route("POST", r"/api/logout")
+def _logout(h, q):
+    h.cookie = f"{COOKIE}=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly"
+    return {"user": None, "mode": AUTH}
+
+
 @route("GET", r"/api/config")
 def _config(h, q):
     return {"integrationUrl": sim.INTEGRATION_URL, "defaultAceUrl": sim.default_ace_url(), "aceUrlAllowed": sim.ACE_URL_ALLOWED, "intakeBucket": INTAKE_BUCKET, "outputBucket": OUTPUT_BUCKET,
@@ -337,12 +431,33 @@ def _testloan(h, q):
 
 @route("GET", r"/api/batches")
 def _list(h, q):
-    return sim.list_batches(q.get("q", ""), q.get("days") or None)
+    """{items, total, offset, limit}; state: a lifecycle state, "open" or "attention"; mine=1: created or submitted by me."""
+    rows = sim.list_batches(q.get("q", ""), q.get("days") or None, limit=10 ** 9)
+    state, me = q.get("state", ""), sim.operator()
+    if q.get("mine") and me:
+        rows = [r for r in rows if me in (r.get("createdBy"), r.get("submittedBy"))]
+    if state == "open":
+        rows = [r for r in rows if r["state"] not in ("CLOSED", "REJECTED")]
+    elif state == "attention":
+        rows = [r for r in rows if sim.needs_attention(r)]
+    elif state:
+        rows = [r for r in rows if r["state"] == state]
+    offset, limit = max(0, int(q.get("offset") or 0)), q.get("limit", "50")
+    limit = len(rows) if limit == "all" else max(1, min(int(limit), 1000))
+    return {"items": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit}
 
 
 @route("GET", r"/api/callbacks")
 def _callbacks(h, q):
-    return sim.list_callbacks(int(q.get("limit") or 500))
+    """{items, total, offset, limit, attention}; filter: accepted | refused | errors | unknown; q matches aceJobId / correlationId."""
+    rows = sim.list_callbacks(10 ** 9)
+    attention = sum(1 for c in rows if c["contractErrors"] or not c.get("correlationId"))
+    f, text = q.get("filter", ""), q.get("q", "").strip().lower()
+    rows = [c for c in rows if (not f or (f == "accepted" and c["answeredWith"] == 200) or (f == "refused" and c["answeredWith"] != 200)
+                                or (f == "errors" and c["contractErrors"]) or (f == "unknown" and not c.get("correlationId")))
+            and (not text or text in f"{c['aceJobId']} {c.get('correlationId') or ''}".lower())]
+    offset, limit = max(0, int(q.get("offset") or 0)), max(1, min(int(q.get("limit") or 100), 1000))
+    return {"items": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit, "attention": attention}
 
 
 @route("POST", r"/api/batches")
@@ -523,6 +638,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         if filename:
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        if getattr(self, "cookie", None):
+            self.send_header("Set-Cookie", self.cookie)
         self.end_headers()
         self.wfile.write(data)
 
@@ -535,8 +652,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         for m, pattern, fn in ROUTES:
             match = pattern.match(url.path)
             if m == method and match:
-                name = re.sub(r"[^\w .@-]", "", urllib.parse.unquote(self.headers.get("X-Operator") or ""))[:64].strip()
-                sim.OPERATOR.name = name or None
+                sim.OPERATOR.name = current_user(self)
+                self.cookie = None
+                if not sim.OPERATOR.name and url.path not in PUBLIC:
+                    return self._send(401, {"error": "sign in first", "mode": AUTH})
                 try:
                     result = fn(self, q, **match.groupdict())
                     if isinstance(result, Download):

@@ -5,6 +5,12 @@ console on a laptop (with moto as S3): onboarding (202 + aceJobId, idempotent), 
 pre-check of the control file and PDFs, a HITL pause when the control file's loan amount / seller loan number look
 wrong, *Response.json in the output bucket and the terminal callback with retries and one Idempotency-Key.
 It is a stand-in for trying the console, not a model of ACE's real processing.
+
+Faults, to check that the simulator reports them: put "simulate": "<fault>" in the control file's loanInfo
+(the console's raw control-file editor), or use a loanId starting with REJECT for a refused onboarding.
+  processing-failure  3000 PROCESSING_FAILED            no-callback     finishes, never calls back
+  bad-callback        callback breaks the contract      missing-response  callback names a file that was never written
+  status-mismatch     callback disagrees with Status    bad-response    Response.json breaks spec 6.4
 """
 import io
 import json
@@ -103,8 +109,9 @@ def response_file(job, control, extraction):
             "fileName": "_".join(job["pages"]), "fileSize": str(total)}
 
 
-def callback(job):
-    body = json.dumps({k: job["status"][k] for k in ("aceJobId", "status", "batchPath", "failedDocuments", "timestamp")}).encode()
+def callback(job, override=None):
+    payload = {k: job["status"][k] for k in ("aceJobId", "status", "batchPath", "failedDocuments", "timestamp")}
+    body = json.dumps(override(payload) if override else payload).encode()
     key = str(uuid.uuid4())
     for attempt in range(8):
         req = urllib.request.Request(CALLBACK, data=body, method="POST", headers={
@@ -133,6 +140,10 @@ def process(job):
         set_status(job, "EXTRACTION", "RUNNING", 4000, "IN_PROGRESS", "Extraction is currently in progress.")
         time.sleep(STEP)
         info = control["loanInfo"]
+        fault = info.get("simulate", "")
+        if fault == "processing-failure":
+            set_status(job, "EXTRACTION", "FAILED", 3000, "PROCESSING_FAILED", "Extraction service returned an error (simulated).")
+            return callback(job)
         suspicious = [k for k, v in SUSPICIOUS.items() if info.get(k) == v]
         if suspicious:
             job["review"] = [{"fieldName": k, "metadataValue": info.get(k), "extractedValue": {"loanAmount": "250000.00", "sellerLoanNumber": "7700112233"}[k],
@@ -148,9 +159,22 @@ def process(job):
             set_status(job, "VALIDATION", "FAILED", 2000, "VALIDATION_FAILED", desc, batch_path=name)
             return callback(job)
         extraction = control.get("extractionRequired") == "true"
-        s3.put_object(Bucket=OUTPUT, Key=name, Body=json.dumps(response_file(job, control, extraction), indent=2).encode(), ContentType="application/json")
+        doc = response_file(job, control, extraction)
+        if fault == "bad-response":
+            doc["aceJobId"] = "ADR-SOMEONE-ELSE"
+            next(iter(doc["Documents"].values()))[0]["pageRange"] = "pages one to three"
+        if fault != "missing-response":
+            s3.put_object(Bucket=OUTPUT, Key=name, Body=json.dumps(doc, indent=2).encode(), ContentType="application/json")
         set_status(job, "COMPLETED", "CLIENT_CALLBACK_PENDING", 0, "COMPLETED", "Processing completed successfully.", batch_path=name)
-        if callback(job):
+        if fault == "no-callback":
+            return
+        override = None
+        if fault == "bad-callback":
+            override = lambda p: {**p, "status": {"code": "0", "value": "SUCCESS", "description": ""}, "timestamp": "27/09/2026 10:00", "output": {"batchPath": p["batchPath"]}}  # noqa: E731
+        elif fault == "status-mismatch":
+            set_status(job, "COMPLETED", "CLIENT_CALLBACK_PENDING", 3000, "PROCESSING_FAILED", "Status store disagrees (simulated).")
+            override = lambda p: {**p, "status": {"code": 0, "value": "COMPLETED", "description": "Processing completed successfully."}, "batchPath": name}  # noqa: E731
+        if callback(job, override) and fault != "status-mismatch":
             set_status(job, "COMPLETED", "CLIENT_CALLBACK_DONE", 0, "COMPLETED", "Processing completed successfully.", batch_path=name)
     except Exception as exc:
         set_status(job, "PROCESSING", "FAILED", 3000, "PROCESSING_FAILED", f"Unexpected processing failure: {exc}")
@@ -191,6 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             loan, cid, path = b.get("loanId"), b.get("correlationId"), b.get("batchPath")
             if not (loan and cid and path):
                 return self.reply(400, {"error": "loanId, correlationId and batchPath are required"})
+            if str(loan).startswith("REJECT"):
+                return self.reply(400, {"error": f"loanId {loan} is not onboarded in ACE (simulated rejection)"})
             folder = f"loanId={loan}/correlationId={cid}/"
             if not (path == folder or re.fullmatch(re.escape(folder) + r"[^/]+\.json", path)):
                 return self.reply(400, {"error": f"batchPath must be {folder} or {folder}<control>.json"})

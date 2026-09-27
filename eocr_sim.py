@@ -75,6 +75,8 @@ def check_status_object(status, where):
 
 def check_output_rules(code, job_id, batch_path, failed, where):
     errs = []
+    if code not in STATUS:
+        return errs  # the unknown code is reported by check_status_object; its output rules are undefined
     if code in (0, 2000):
         if not re.fullmatch(re.escape(job_id) + r"/[^/]+\.json", batch_path or ""):
             errs.append(f"{where}: {STATUS[code]} needs batchPath '<aceJobId>/<file>.json', got '{batch_path}'")
@@ -355,6 +357,20 @@ def list_batches(q="", since_days=None, limit=2000):
 _callbacks, _job_cid = {}, {}  # callback records never change once written; job -> execution never changes once known
 
 
+STALE_HOURS = 24
+
+
+def needs_attention(summary):
+    """Open but stuck (no callback after ACE finished, HITL review waiting, no change for STALE_HOURS), rejected, or off-spec."""
+    open_ = summary["state"] in ("SUBMITTED", "IN_PROGRESS", "CALLBACK_RECEIVED")
+    try:
+        stale = open_ and time.time() - datetime.fromisoformat(summary["updatedAt"].replace("Z", "+00:00")).timestamp() > STALE_HOURS * 3600
+    except (AttributeError, ValueError):
+        stale = False
+    return bool((open_ and (summary.get("callbackOverdue") or (summary.get("workflow") or {}).get("state") == "HITL_PENDING")) or stale
+                or summary["state"] == "REJECTED" or summary.get("contractErrors"))
+
+
 def list_callbacks(limit=500):
     """Every callback delivery the eOCR endpoint received (all jobs, known or not), newest first."""
     objs = []
@@ -613,7 +629,10 @@ def on_callback(job_id, record):
             record_status(b, body, "callback reconciliation")
             diff = [f for f in ("status", "batchPath", "failedDocuments") if body.get(f) != p.get(f)]
             if diff:
-                add_event(b, "contract-error", f"callback differs from Status API in {diff}", statusApi={f: body.get(f) for f in diff})
+                msg = "callback differs from Status API in " + ", ".join(f"{f} (callback {p.get(f)!r}, Status API {body.get(f)!r})" for f in diff)
+                if msg not in b["contractErrors"]:
+                    b["contractErrors"].append(msg)
+                add_event(b, "contract-error", msg, statusApi={f: body.get(f) for f in diff})
         else:
             add_event(b, "warning", f"could not reconcile the callback with the Status API: HTTP {code}", body=body)
         b["result"] = result
@@ -893,7 +912,8 @@ class Scenario:
         index_job(self.job, self.correlation_id)
 
         def submitted(b):
-            b.update(state="SUBMITTED", aceJobId=self.job, batchPath=self.batch_path, flaky=self.flaky, submittedAt=now_iso(), aceUrl=INTEGRATION_URL)
+            b.update(state="SUBMITTED", aceJobId=self.job, batchPath=self.batch_path, flaky=self.flaky, submittedAt=now_iso(), aceUrl=INTEGRATION_URL,
+                     submittedBy=operator())
             add_event(b, "submitted", f"onboarding -> HTTP 202, aceJobId {self.job}", request=body, response=resp)
         self.trace(submitted)
         try:
@@ -1008,6 +1028,7 @@ class Scenario:
                         f"{summary['documentTypes']} document types, {summary['documents']} documents, {summary['extractedFields']} extracted fields, validationStatus={doc['validationStatus']}")
 
     def run(self, timeout_s):
+        OPERATOR.name = f"scenario runner ({os.environ.get('SIM_RUN_BY', 'eocr_sim.py run')})"
         if self.after is not None:
             self.after.done.wait(timeout_s)
             self.result["startedAfter"] = self.after.name

@@ -43,6 +43,16 @@ time { cursor: help; }
 .who { display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 label.inline { white-space: nowrap; }
 .who input { width: 150px; padding: 4px 8px; }
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+.pager button { padding: 3px 10px; }
+.more { width: 100%; background: none; border-style: dashed; color: var(--muted); font-size: 12.5px; }
+.run { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.run b { color: var(--ink); font-weight: 600; }
+#login { position: fixed; inset: 0; background: var(--bg); display: grid; place-items: center; z-index: 30; padding: 16px; }
+#login .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 26px 28px; width: min(420px, 100%); }
+#login h2 { margin: 0 0 4px; font-size: 20px; } #login p { color: var(--muted); font-size: 13px; }
+#login input { width: 100%; font-size: 15px; padding: 9px 10px; margin: 6px 0 14px; }
+#login button { width: 100%; padding: 9px; }
 .gl dt { font-weight: 600; margin-top: 8px; } .gl dd { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .col { background: var(--soft); border-radius: 10px; padding: 10px; min-height: 120px; }
 .col h4 { margin: 0 0 8px; font-size: 12.5px; display: flex; justify-content: space-between; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -144,7 +154,7 @@ dialog h3 { margin: 0 0 12px; }
   <div class="env" id="env"></div>
   <nav><button id="tab-pipe" class="on">Pipeline<span class="badge" id="bdg-pipe" hidden></span></button><button id="tab-exec">Executions</button>
     <button id="tab-cb">Callbacks<span class="badge" id="bdg-cb" hidden></span></button><button id="tab-rep">Scenario reports</button></nav>
-  <label class="who" title="Recorded as the creator, submitter or closer of what you do here (kept in this browser)">You<input id="me" placeholder="your name" maxlength="64"></label>
+  <span class="who">Signed in as <b id="me-name"></b><a href="#" id="logout">Sign out</a></span>
   <button id="help" title="What the terms mean">?</button>
 </header>
 <main id="view-pipe"><section style="padding:18px 22px">
@@ -232,6 +242,14 @@ dialog h3 { margin: 0 0 12px; }
   <div class="row" style="justify-content:flex-end;margin-top:12px"><button id="help-close">Close</button></div>
 </dialog>
 
+<div id="login" hidden><form class="box" id="login-form">
+  <h2>eOCR Simulator Console</h2>
+  <p id="login-text">Sign in with your name. It is recorded on everything you create, submit or close, so others can see who ran what.</p>
+  <label for="login-name">Your name</label><input id="login-name" autocomplete="name" maxlength="64" required>
+  <button class="primary" type="submit">Sign in</button>
+  <p id="login-note" style="margin:12px 0 0">This sign-in records who you are; it does not check a password. Use single sign-on (SIM_AUTH=oidc) for real authentication.</p>
+</form></div>
+
 <div id="toast"></div>
 
 <script>
@@ -243,11 +261,12 @@ const J = v => esc(JSON.stringify(v, null, 2));
 let current = null, selected = null, controlDirty = false, rawMode = false, cfg = {};
 
 async function api(method, path, body, raw) {
-  const opt = {method, headers: {"X-Operator": encodeURIComponent(me())}};
+  const opt = {method, headers: {}, credentials: "same-origin"};
   if (raw) { opt.body = raw; opt.headers["Content-Type"] = raw.type || "application/octet-stream"; }
   else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
   const r = await fetch(path, opt);
   const data = await r.json().catch(() => ({error: `HTTP ${r.status}`}));
+  if (r.status === 401) { showLogin(data.mode); throw new Error("Please sign in"); }
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
 }
@@ -266,12 +285,23 @@ const STATE_CLASS = {DRAFT: "s-idle", STAGED: "s-info", SUBMITTED: "s-info", IN_
 const CODE_CLASS = c => c === 0 ? "s-ok" : [1000, 2000, 3000, 4040].includes(c) ? "s-bad" : c === 4000 || c === 202 ? "s-warn" : "s-idle";
 const chip = (text, cls) => `<span class="chip ${cls}">${esc(text)}</span>`;
 const stateChip = b => {
-  if (b.state === "CLOSED" && b.outcome) return chip(`CLOSED · ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad");
+  if (b.state === "CLOSED" && b.outcome) {
+    if (![0, 1000, 2000, 3000, null].includes(b.outcome.code) && b.outcome.value !== "ABANDONED") return chip("CLOSED · INVALID CALLBACK", "s-bad");
+    const n = errCount(b);
+    if (b.outcome.code === 0 && n) return chip(`CLOSED · COMPLETED · ${n} spec issue${n > 1 ? "s" : ""}`, "s-warn");
+    return chip(`CLOSED · ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad");
+  }
   return chip(b.state, STATE_CLASS[b.state] || "s-idle");
 };
 const store = {get: k => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
                set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private window */ } }};
-const me = () => ($("#me") && $("#me").value.trim()) || "";
+let user = null, authMode = "name";
+const me = () => user || "";
+const byWho = n => n ? esc(n) : `<span title="recorded before sign-in was required">unknown</span>`;
+const runLine = b => b.submittedAt
+  ? `Submitted <b>${when(b.submittedAt)}</b> by <b>${byWho(b.submittedBy)}</b>${b.closedAt ? ` · finished in <b>${dur(Date.parse(b.closedAt) - Date.parse(b.submittedAt))}</b>`
+      : b.state !== "REJECTED" ? ` · running ${dur(Date.now() - Date.parse(b.submittedAt))}` : ""}`
+  : `Created <b>${when(b.createdAt)}</b> by <b>${byWho(b.createdBy)}</b> · not submitted`;
 const DTF = new Intl.DateTimeFormat(undefined, {year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"});
 const when = iso => { if (!iso) return "—"; const d = new Date(iso); if (isNaN(d)) return esc(iso);
   return `<time datetime="${esc(iso)}" title="${esc(d.toISOString().replace(".000", ""))} UTC">${esc(DTF.format(d))}</time>`; };
@@ -280,23 +310,29 @@ const ago = iso => { if (!iso) return ""; const s = (Date.now() - Date.parse(iso
   return s < 60 ? `${Math.max(0, s | 0)}s ago` : s < 3600 ? `${s / 60 | 0}m ago` : s < 86400 ? `${s / 3600 | 0}h ago` : `${s / 86400 | 0}d ago`; };
 
 // ---------------------------------------------------------------- list
+let listOffset = 0;
+const PAGE = 50;
 async function loadList() {
-  let items;
-  try { items = await api("GET", "/api/batches?q=" + encodeURIComponent($("#q").value)); } catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  const f = $("#filter").value;
-  if (f === "attention") items = items.filter(needsAttention);
-  items = items.filter(b => f === "attention" || !f || (f === "open" ? !["CLOSED", "REJECTED"].includes(b.state) : b.state === f));
-  $("#list").innerHTML = items.length ? items.map(b => `
+  let page;
+  try { page = await api("GET", `/api/batches?q=${encodeURIComponent($("#q").value)}&state=${$("#filter").value}&offset=${listOffset}&limit=${PAGE}`); }
+  catch (e) { $("#list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (!page.items.length && listOffset) { listOffset = Math.max(0, listOffset - PAGE); return loadList(); }
+  const items = page.items;
+  $("#list").innerHTML = (items.length ? items.map(b => `
     <div class="item ${b.correlationId === selected ? "sel" : ""}" data-cid="${esc(b.correlationId)}">
       <div class="top"><span class="cid">${esc(b.correlationId)}</span>${stateChip(b)}</div>
       <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}
-        ${b.workflow && b.workflow.stage && b.state !== "CLOSED" ? `<span>${esc(b.workflow.stage)}/${esc(b.workflow.state)}</span>` : ""}
-        <span>${esc(b.submittedBy || b.createdBy || b.source)}</span><span title="${esc(b.updatedAt)}">${ago(b.updatedAt)}</span></div>
-    </div>`).join("") : `<div class="empty">No executions yet.</div>`;
+        ${b.workflow && b.workflow.stage && b.state !== "CLOSED" ? `<span>${esc(b.workflow.stage)} · ${esc(b.workflow.state)}</span>` : ""}</div>
+      <div class="run">${runLine(b)}</div>
+    </div>`).join("") : `<div class="empty">No executions match.</div>`)
+    + (page.total > PAGE ? `<div class="pager"><span>${page.offset + 1}–${page.offset + items.length} of ${page.total}</span>
+      <span><button data-page="-1" ${page.offset ? "" : "disabled"}>‹ Prev</button> <button data-page="1" ${page.offset + items.length < page.total ? "" : "disabled"}>Next ›</button></span></div>` : "");
 }
-$("#list").addEventListener("click", e => { const it = e.target.closest(".item"); if (it) select(it.dataset.cid); });
-$("#filter").addEventListener("change", loadList);
-$("#q").addEventListener("input", () => { clearTimeout(loadList.h); loadList.h = setTimeout(loadList, 300); });
+$("#list").addEventListener("click", e => {
+  const pg = e.target.closest("[data-page]"); if (pg) { listOffset = Math.max(0, listOffset + PAGE * +pg.dataset.page); return loadList(); }
+  const it = e.target.closest(".item"); if (it) select(it.dataset.cid); });
+$("#filter").addEventListener("change", () => { listOffset = 0; loadList(); });
+$("#q").addEventListener("input", () => { clearTimeout(loadList.h); loadList.h = setTimeout(() => { listOffset = 0; loadList(); }, 300); });
 
 async function select(cid) {
   if (cid !== selected) { controlDirty = false; rawMode = false; }
@@ -346,7 +382,11 @@ function statusBanner(b) {
     [tone, t, d, go] = ["bad", "ACE refused the submission", `${esc(ev ? ev.message : "")}. Fix the package and submit again.`, "pkg"]; }
   else if (b.state === "CLOSED") {
     const o = b.outcome || {}, sm = (b.result || {}).summary;
-    if (o.code === 0) [tone, t, d] = ["ok", "Completed", `${esc(o.description)}${sm ? ` Result: ${sm.documents} documents in ${sm.documentTypes} types, ${sm.extractedFields} extracted fields.` : ""}`];
+    const aceSays = ((b.status || {}).status) || {};
+    if (![0, 1000, 2000, 3000, null].includes(o.code) && o.value !== "ABANDONED") [tone, t, d] = ["bad", "ACE sent an invalid callback",
+      `Its status was code ${esc(JSON.stringify(o.code))} / value ${esc(JSON.stringify(o.value))}, which the spec does not allow.${aceSays.value ? ` ACE's Status API says ${esc(aceSays.code)} ${esc(aceSays.value)}.` : ""}`];
+    else if (o.code === 0 && (errCount(b) || (b.result && b.result.ok === false))) [tone, t, d] = ["warn", "Completed, with problems", `${esc(o.description)} ACE reported success, but what it sent does not meet the spec (see Spec compliance).`];
+    else if (o.code === 0) [tone, t, d] = ["ok", "Completed", `${esc(o.description)}${sm ? ` Result: ${sm.documents} documents in ${sm.documentTypes} types, ${sm.extractedFields} extracted fields.` : ""}`];
     else if (o.value === "ABANDONED") [tone, t, d] = ["warn", "Closed by hand before ACE finished", esc(o.description)];
     else [tone, t, d] = ["bad", `Failed: ${o.value}`, `${esc(o.description)}${(o.failedDocuments || []).length ? " — " + o.failedDocuments.map(f => `${esc(f.documentName)} (${esc(f.reason)})`).join(", ") : ""}`];
     d += ` <span style="color:var(--muted)">Closed ${when(b.closedAt)} ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " · " + esc(b.closedByUser) : ""}${
@@ -379,6 +419,7 @@ function render(b) {
         <button id="a-resubmit" ${b.documents.length ? "" : "disabled"} title="Same documents and loan data, new correlationId">Resubmit as new execution</button>
         <button class="danger" id="a-close" ${b.state === "CLOSED" ? "disabled" : ""}>Close…</button>
       </div></div>
+    <div class="run" style="font-size:13px;margin:-2px 0 8px">${runLine(b)}${b.closedAt ? ` · closed ${b.closedBy === "callback" ? "on ACE's callback" : "by " + esc(b.closedBy)}${b.closedByUser ? " (" + esc(b.closedByUser) + ")" : ""}` : ""}</div>
     <div class="meta"><span>Loan <b>${esc(b.loanId)}</b></span><span>ACE job <b>${esc(b.aceJobId || "not submitted")}</b></span>
       <span>Created ${when(b.createdAt)}${b.createdBy ? ` by <b>${esc(b.createdBy)}</b>` : ""}</span>
       ${b.submittedAt ? `<span>Submitted ${when(b.submittedAt)}${b.submittedBy ? ` by <b>${esc(b.submittedBy)}</b>` : ""}</span>` : ""}
@@ -448,6 +489,9 @@ function submitCard(b) {
   const canSubmit = ["STAGED", "REJECTED"].includes(b.state);
   return `<div class="card"><h3><span class="n">3</span>Submit to ACE <span class="mono" style="font-weight:400;color:var(--muted)">POST /integration/loan/onboarding</span></h3>
     <p class="hint">ACE accepts with an ACE job number and then works in the background (spec 4).</p>
+    ${canSubmit ? (() => { const i = (b.events || []).map(e => e.type).lastIndexOf("staged");
+        const w = i < 0 ? [] : b.events.slice(i).filter(e => e.type === "warning");
+        return w.length ? `<ul class="errs">${w.map(e => `<li>Before you submit: ${esc(e.message)}</li>`).join("")}</ul>` : ""; })() : ""}
     ${canSubmit ? `<div class="row">
         <label>Point ACE at (batchPath)<select id="s-mode"><option value="file">control file (…/${esc(b.controlFileName)})</option><option value="folder">folder (…/correlationId=…/)</option></select></label>
         <label style="flex-basis:100%">ACE endpoint for this submission<input id="s-ace" value="${esc(cfg.defaultAceUrl || "")}" placeholder="default ACE endpoint"></label>
@@ -555,7 +599,7 @@ function wire(b) {
   const after = async r => { if (r) { controlDirty = false; await loadDetail(true); loadList(); } };
   $("#a-refresh").onclick = e => act(e.target, () => api("POST", base + "/refresh"), "Status refreshed").then(after);
   $("#a-resubmit").onclick = e => act(e.target, () => api("POST", base + "/resubmit"), "New execution created").then(r => r && (loadList(), select(r.correlationId)));
-  $("#a-close").onclick = () => { if (!needName()) return; $("#c-note").value = ""; $("#dlg-close").showModal(); };
+  $("#a-close").onclick = () => { $("#c-note").value = ""; $("#dlg-close").showModal(); };
   document.querySelectorAll("[data-rm]").forEach(btn => btn.onclick = e => act(e.target, () => api("DELETE", `${base}/files/${encodeURIComponent(btn.dataset.rm)}`), "Removed").then(after));
   document.querySelectorAll("[data-test]").forEach(btn => btn.onclick = e =>
     act(e.target, () => api("POST", base + "/testdata", {kind: btn.dataset.test, pages: +$("#t-pages").value}), "Test document staged").then(after));
@@ -581,7 +625,7 @@ function wire(b) {
   if ($("#cf-save")) $("#cf-save").onclick = e => act(e.target, () => api("PUT", base + "/control", controlBody()), "Saved").then(after);
   if ($("#cf-stage")) $("#cf-stage").onclick = e => act(e.target, async () => { await api("PUT", base + "/control", controlBody()); return api("POST", base + "/stage"); },
     "Control file written to S3").then(after);
-  if ($("#s-submit")) $("#s-submit").onclick = e => needName() && act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}))
+  if ($("#s-submit")) $("#s-submit").onclick = e => act(e.target, () => api("POST", base + "/submit", {batchPathMode: $("#s-mode").value, flaky: +$("#s-flaky").value, aceUrl: $("#s-ace").value.trim()}))
     .then(r => { if (r) { toast(r.state === "REJECTED" ? "ACE rejected the onboarding request — see the banner" : `Accepted by ACE: ${r.aceJobId}`, r.state === "REJECTED");
       if (r.state !== "REJECTED") views[r.correlationId] = "track"; } after(r); });
   document.querySelectorAll("[data-rec]").forEach(a => a.onclick = e => { e.preventDefault();
@@ -603,7 +647,7 @@ $("#c-ok").onclick = e => act(e.target, () => api("POST", `/api/batches/${encode
   .then(r => { $("#dlg-close").close(); if (r) { loadDetail(true); loadList(); } });
 
 // ---------------------------------------------------------------- new execution
-$("#new").onclick = () => { if (!needName()) return; ["n-loan", "n-cid", "n-seller", "n-amount", "n-borrower"].forEach(id => $("#" + id).value = ""); $("#dlg-new").showModal(); };
+$("#new").onclick = () => { ["n-loan", "n-cid", "n-seller", "n-amount", "n-borrower"].forEach(id => $("#" + id).value = ""); $("#dlg-new").showModal(); };
 $("#n-cancel").onclick = () => $("#dlg-new").close();
 $("#n-fill").onclick = e => act(e.target, () => api("GET", "/api/testloan")).then(t => {
   if (!t) return; if (t.error) return toast("No test loan: " + t.error, true);
@@ -652,12 +696,12 @@ const COLUMNS = [
   ["Rejected", b => b.state === "REJECTED"],
 ];
 const TERMINAL = b => [0, 1000, 2000, 3000].includes((b.status || {}).code);
-let pipeFilter = "";
+let pipeFilter = "", colLimit = {};
+const COL_PAGE = 20;
 async function loadPipeline() {
   let items;
-  try { items = await api("GET", `/api/batches?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`); }
+  try { items = (await api("GET", `/api/batches?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}&limit=all${$("#p-mine").checked ? "&mine=1" : ""}`)).items; }
   catch (e) { $("#board").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  if ($("#p-mine").checked && me()) items = items.filter(b => [b.createdBy, b.submittedBy].includes(me()));
   const day = Date.now() - 86400e3;
   const closed = items.filter(b => b.state === "CLOSED");
   const ok = closed.filter(b => b.outcome && b.outcome.code === 0);
@@ -686,7 +730,7 @@ async function loadPipeline() {
   $("#board").innerHTML = cols.every(([, c]) => !c.length) ? `<div class="empty">${pipeFilter ? `Nothing ${esc(label)} right now. <a href="#" id="clear-f">Show all</a>`
       : "Nothing here. Adjust the search or period, or create a new execution."}</div>`
     : cols.filter(([, c]) => c.length).map(([name, col]) => `<div class="col"><h4>${esc(name)} <b>${col.length}</b></h4>
-    ${col.map(b => { const wf = b.workflow || {}, st = b.status || {};
+    ${col.slice(0, colLimit[name] || COL_PAGE).map(b => { const wf = b.workflow || {}, st = b.status || {};
       return `<div class="pcard" data-go="${esc(b.correlationId)}"><div class="cid">${esc(b.correlationId)}</div>
       <div class="sub"><span>loan ${esc(b.loanId)}</span>${b.aceJobId ? `<span class="mono">${esc(b.aceJobId)}</span>` : ""}</div>
       <div class="sub">${b.state === "CLOSED" && b.outcome ? chip(`${b.outcome.code ?? "—"} ${b.outcome.value}`, b.outcome.code === 0 ? "s-ok" : "s-bad")
@@ -696,12 +740,13 @@ async function loadPipeline() {
         ${b.callbackOverdue && b.state !== "CLOSED" ? chip("no callback", "s-bad") : ""}${isStale(b) ? chip(`no change ${STALE_H}h+`, "s-warn") : ""}
         ${b.contractErrors ? chip(`${b.contractErrors} spec deviations`, "s-bad") : ""}</div>
       ${b.aceUrl && b.aceUrl !== cfg.defaultAceUrl ? `<div class="sub mono">ACE ${esc(b.aceUrl)}</div>` : ""}
-      <div class="sub"><span>${esc(b.submittedBy || b.createdBy || b.source)}</span>
-        <span title="${esc(b.submittedAt || "")}">${b.submittedAt ? "submitted " + ago(b.submittedAt) : "not submitted"}</span>
-        ${b.submittedAt && b.callbackAt ? `<span>callback after ${dur(Date.parse(b.callbackAt) - Date.parse(b.submittedAt))}</span>` : ""}</div></div>`; }).join("")}
+      <div class="run">${runLine(b)}</div></div>`; }).join("")}
+    ${col.length > (colLimit[name] || COL_PAGE) ? `<button class="more" data-more="${esc(name)}">Show ${Math.min(COL_PAGE, col.length - (colLimit[name] || COL_PAGE))} more of ${col.length - (colLimit[name] || COL_PAGE)}</button>` : ""}
     </div>`).join("");
 }
-$("#board").addEventListener("click", e => { if (e.target.id === "clear-f") { e.preventDefault(); pipeFilter = ""; loadPipeline(); } });
+$("#board").addEventListener("click", e => { const m = e.target.closest("[data-more]");
+  if (m) { colLimit[m.dataset.more] = (colLimit[m.dataset.more] || COL_PAGE) + COL_PAGE; return loadPipeline(); }
+  if (e.target.id === "clear-f") { e.preventDefault(); pipeFilter = ""; loadPipeline(); } });
 $("#stats").addEventListener("click", e => { const t = e.target.closest(".stat.click"); if (t) { pipeFilter = pipeFilter === t.dataset.f ? "" : t.dataset.f; loadPipeline(); } });
 $("#p-mine").addEventListener("change", loadPipeline);
 $("#p-csv").onclick = () => { location.href = `/api/export/executions.csv?q=${encodeURIComponent($("#p-q").value)}&days=${$("#p-days").value}`; };
@@ -714,15 +759,16 @@ $("#p-new").onclick = () => $("#new").click();
 
 // ---------------------------------------------------------------- callbacks viewer
 let cbOpen = new Set();
+let cbOffset = 0;
+const CB_PAGE = 100;
 async function loadCallbacks() {
-  let all;
-  try { all = await api("GET", "/api/callbacks"); } catch (e) { $("#cb-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  updateBadge("cb", all.filter(c => c.contractErrors.length || !c.correlationId).length);
-  const f = $("#cb-filter").value, q = $("#cb-q").value.trim().toLowerCase();
-  const rows = all.filter(c => (!f || (f === "accepted" ? c.answeredWith === 200 : f === "refused" ? c.answeredWith !== 200
-      : f === "errors" ? c.contractErrors.length : !c.correlationId)) && (!q || `${c.aceJobId} ${c.correlationId || ""}`.toLowerCase().includes(q)));
-  $("#cb-totals").textContent = `${rows.length} of ${all.length} deliveries · ${new Set(all.map(c => c.aceJobId)).size} jobs · ${all.filter(c => c.contractErrors.length).length} with contract errors`;
-  $("#cb-table").innerHTML = rows.length ? `<div style="overflow-x:auto"><table><tr><th>received</th><th>aceJobId</th><th>execution</th><th>#</th><th>answered</th>
+  let page;
+  try { page = await api("GET", `/api/callbacks?filter=${$("#cb-filter").value}&q=${encodeURIComponent($("#cb-q").value.trim())}&offset=${cbOffset}&limit=${CB_PAGE}`); }
+  catch (e) { $("#cb-table").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  updateBadge("cb", page.attention);
+  const rows = page.items;
+  $("#cb-totals").textContent = `${page.total} deliveries match · ${page.attention} with spec deviations or for unknown jobs`;
+  $("#cb-table").innerHTML = (rows.length ? `<div style="overflow-x:auto"><table><tr><th>received</th><th>aceJobId</th><th>execution</th><th>#</th><th>our answer</th>
     <th>outcome</th><th>result file</th><th>failed docs</th><th>spec</th></tr>
     ${rows.map(c => { const p = c.payload || {}, s = p.status || {}, id = `${c.aceJobId}/${c.attempt}`;
       return `<tr class="cb" data-cb="${esc(id)}"><td>${when(c.receivedAt)}</td><td class="mono">${esc(c.aceJobId)}</td>
@@ -731,14 +777,17 @@ async function loadCallbacks() {
       <td class="mono">${esc(p.batchPath || "—")}</td><td>${(p.failedDocuments || []).length || ""}</td>
       <td>${c.contractErrors.length ? chip(`${c.contractErrors.length} deviations`, "s-bad") : chip("ok", "s-ok")}</td></tr>
       ${cbOpen.has(id) ? `<tr><td colspan="9"><pre>${J({payload: p, contractErrors: c.contractErrors, idempotencyKey: c.idempotencyKey, callerPrincipal: c.callerPrincipal, headers: c.headers})}</pre></td></tr>` : ""}`; }).join("")}
-    </table></div>` : `<div class="empty">No callbacks match.</div>`;
+    </table></div>` : `<div class="empty">No callbacks match.</div>`)
+    + (page.total > CB_PAGE ? `<div class="pager"><span>${page.offset + 1}–${page.offset + rows.length} of ${page.total}</span>
+      <span><button data-cbpage="-1" ${page.offset ? "" : "disabled"}>‹ Prev</button> <button data-cbpage="1" ${page.offset + rows.length < page.total ? "" : "disabled"}>Next ›</button></span></div>` : "");
 }
 $("#cb-table").addEventListener("click", e => {
   const a = e.target.closest("[data-go]"); if (a) { e.preventDefault(); showTab("exec"); return select(a.dataset.go); }
+  const pg = e.target.closest("[data-cbpage]"); if (pg) { cbOffset = Math.max(0, cbOffset + CB_PAGE * +pg.dataset.cbpage); return loadCallbacks(); }
   const r = e.target.closest("[data-cb]"); if (r) { const id = r.dataset.cb; cbOpen.has(id) ? cbOpen.delete(id) : cbOpen.add(id); loadCallbacks(); }
 });
-$("#cb-filter").addEventListener("change", loadCallbacks);
-$("#cb-q").addEventListener("input", () => { clearTimeout(loadCallbacks.h); loadCallbacks.h = setTimeout(loadCallbacks, 300); });
+$("#cb-filter").addEventListener("change", () => { cbOffset = 0; loadCallbacks(); });
+$("#cb-q").addEventListener("input", () => { clearTimeout(loadCallbacks.h); loadCallbacks.h = setTimeout(() => { cbOffset = 0; loadCallbacks(); }, 300); });
 
 // ---------------------------------------------------------------- default ACE endpoint
 function renderEnv() {
@@ -754,12 +803,27 @@ $("#ace-save").onclick = e => saveAce(e.target, $("#ace-url").value.trim());
 $("#ace-reset").onclick = e => saveAce(e.target, "");
 
 // ---------------------------------------------------------------- boot
-$("#me").value = store.get("eocr-operator");
-$("#me").addEventListener("change", () => { store.set("eocr-operator", me()); if (tab === "pipe") loadPipeline(); });
+function showLogin(mode) {
+  authMode = mode || authMode;
+  if (authMode === "oidc") {
+    $("#login-text").textContent = "Your single sign-on session has ended. Reload the page to sign in again.";
+    $("#login-form").querySelectorAll("input,label,button,#login-note").forEach(el => el.hidden = true);
+  }
+  $("#login").hidden = false; setTimeout(() => $("#login-name").focus(), 50);
+}
+function signedIn(u) {
+  user = u; $("#me-name").textContent = u; $("#login").hidden = true;
+  $("#logout").hidden = authMode === "oidc";
+}
+$("#login-form").onsubmit = async e => { e.preventDefault();
+  const r = await act(e.submitter, () => api("POST", "/api/login", {name: $("#login-name").value}));
+  if (r) { signedIn(r.user); boot(); } };
+$("#logout").onclick = async e => { e.preventDefault(); await api("POST", "/api/logout").catch(() => {}); user = null; location.hash = ""; location.reload(); };
 $("#help").onclick = () => $("#dlg-help").showModal();
 $("#help-close").onclick = () => $("#dlg-help").close();
-const needName = () => { if (me()) return true; toast("Enter your name at the top right first — it is recorded with what you do.", true); $("#me").focus(); return false; };
-(async () => {
+let booted = false;
+async function boot() {
+  if (booted) return; booted = true;
   try { cfg = await api("GET", "/api/config"); } catch (e) { toast(e.message, true); }
   renderEnv();
   $("#env").insertAdjacentHTML("beforeend", `<span>intake s3://${esc(cfg.intakeBucket)}</span><span>output s3://${esc(cfg.outputBucket)}</span>`);
@@ -771,12 +835,14 @@ const needName = () => { if (me()) return true; toast("Enter your name at the to
     else if (tab === "pipe") loadPipeline();
     else if (tab === "cb" && !cbOpen.size) loadCallbacks();
     if (tick % 3 === 0) {  // keep both badges current whatever tab is open
-      if (tab !== "pipe") api("GET", "/api/batches?days=30").then(items => updateBadge("pipe", items.filter(needsAttention).length)).catch(() => {});
-      if (tab !== "cb") api("GET", "/api/callbacks").then(all => updateBadge("cb", all.filter(c => c.contractErrors.length || !c.correlationId).length)).catch(() => {});
+      if (tab !== "pipe") api("GET", "/api/batches?days=30&state=attention&limit=1").then(p => updateBadge("pipe", p.total)).catch(() => {});
+      if (tab !== "cb") api("GET", "/api/callbacks?limit=1").then(p => updateBadge("cb", p.attention)).catch(() => {});
     }
   }, 10000);
-  api("GET", "/api/callbacks").then(all => updateBadge("cb", all.filter(c => c.contractErrors.length || !c.correlationId).length)).catch(() => {});
-})();
+  api("GET", "/api/callbacks?limit=1").then(p => updateBadge("cb", p.attention)).catch(() => {});
+}
+api("GET", "/api/me").then(r => { authMode = r.mode; if (r.user) { signedIn(r.user); boot(); } else showLogin(r.mode); })
+  .catch(e => toast(e.message, true));
 </script>
 </body>
 </html>
